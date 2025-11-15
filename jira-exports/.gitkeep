@@ -1,0 +1,2 @@
+# This file ensures the jira-exports directory is tracked in git
+# Place your JIRA CSV exports in this folder

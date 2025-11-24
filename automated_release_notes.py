@@ -575,20 +575,25 @@ class AutomatedReleaseNotes:
             raise
 
 
-# Vald8 Evaluation Wrapper
-@vald8(dataset="tests/data.jsonl", tests=["custom_judge"], judge_provider="openai", judge_model="gpt-5.1")
-def evaluate_release_note_generation(issue: Dict[str, Any]) -> str:
+
+
+# Create a module-level instance for Vald8 evaluation
+_generator_instance = None
+
+def _get_generator():
+    """Lazy initialization of generator instance."""
+    global _generator_instance
+    if _generator_instance is None:
+        _generator_instance = AutomatedReleaseNotes()
+    return _generator_instance
+
+@vald8(dataset="tests/data.jsonl", tests=["custom_judge"], judge_provider="openai", judge_model="gpt-4o-mini")
+def create_release_note_for_story(title: str, description: str, labels: List[str]) -> str:
     """
-    Wrapper function for Vald8 evaluation.
-    Generates a release note for a single issue using the AutomatedReleaseNotes class.
+    Module-level function for Vald8 evaluation.
+    Delegates to the AutomatedReleaseNotes instance method.
     """
-    # Initialize generator (this will use env vars for auth)
-    generator = AutomatedReleaseNotes()
-    
-    title = issue.get('summary', '')
-    description = issue.get('description', '')
-    labels = issue.get('labels', [])
-    
+    generator = _get_generator()
     return generator.create_release_note_for_story(title, description, labels)
 
 

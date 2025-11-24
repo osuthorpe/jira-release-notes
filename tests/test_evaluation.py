@@ -25,9 +25,9 @@ def test_release_note_quality():
     if 'summary' in results:
         summary = results['summary']
         print(f"\nSummary:")
-        print(f"  Total: {summary.get('total', 0)}")
-        print(f"  Passed: {summary.get('passed', 0)}")
-        print(f"  Failed: {summary.get('failed', 0)}")
+        print(f"  Total: {summary.get('total_tests', 0)}")
+        print(f"  Passed: {summary.get('passed_tests', 0)}")
+        print(f"  Failed: {summary.get('failed_tests', 0)}")
         print(f"  Success Rate: {summary.get('success_rate', 0):.1%}")
     
     if 'tests' in results:

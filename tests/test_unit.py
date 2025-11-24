@@ -20,9 +20,9 @@ class TestAutomatedReleaseNotes:
     
     def test_initialization(self, generator):
         """Test that the generator initializes correctly."""
-        assert generator.output_dir == "output"
-        assert generator.jira_exports_dir == "jira-exports"
-        assert generator.client is not None
+        assert generator.output_dir.endswith("output")
+        assert generator.jira_exports_dir.endswith("jira-exports")
+        assert generator.openai_client is not None
     
     def test_format_date(self, generator):
         """Test date formatting."""
@@ -50,7 +50,7 @@ class TestAutomatedReleaseNotes:
         # Modify the generator to use the test directory
         generator.jira_exports_dir = str(test_dir)
         
-        latest = generator.get_latest_csv_file()
+        latest = generator.find_latest_csv_file()
         
         # Should return one of the files
         assert latest is not None
@@ -63,7 +63,7 @@ class TestAutomatedReleaseNotes:
         
         generator.jira_exports_dir = str(test_dir)
         
-        latest = generator.get_latest_csv_file()
+        latest = generator.find_latest_csv_file()
         assert latest is None
     
     @patch('automated_release_notes.pd.read_csv')
@@ -71,13 +71,20 @@ class TestAutomatedReleaseNotes:
         """Test CSV file reading."""
         # Mock pandas DataFrame
         mock_df = MagicMock()
-        mock_df.to_dict.return_value = [
-            {'Summary': 'Test Issue', 'Description': 'Test Description', 'Labels': 'bug,urgent'}
+        mock_df.iterrows.return_value = [
+            (0, {
+                'Issue key': 'TEST-1',
+                'Summary': 'Test Issue',
+                'Description': 'Test Description',
+                'Labels': 'bug,urgent',
+                'Issue Type': 'Bug',
+                'Status': 'Done'
+            })
         ]
         mock_read_csv.return_value = mock_df
-        
-        issues = generator.read_csv_file('test.csv')
-        
+
+        issues = generator.read_csv_issues('test.csv')
+
         assert len(issues) == 1
         assert issues[0]['summary'] == 'Test Issue'
         assert issues[0]['description'] == 'Test Description'

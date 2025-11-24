@@ -1,0 +1,92 @@
+name: AI Evaluation Tests
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'automated_release_notes.py'
+      - 'tests/test_evaluation.py'
+      - 'tests/data.jsonl'
+  push:
+    branches: [ main ]
+    paths:
+      - 'automated_release_notes.py'
+      - 'tests/test_evaluation.py'
+      - 'tests/data.jsonl'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  evaluate-ai-quality:
+    runs-on: ubuntu-latest
+    if: ${{ secrets.OPENAI_API_KEY != '' }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.9
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.9"
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-evaluation-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-evaluation-
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run evaluation tests
+      run: |
+        python -m pytest tests/test_evaluation.py -v -s
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      continue-on-error: true
+
+    - name: Upload evaluation results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: evaluation-results
+        path: |
+          runs/
+        retention-days: 30
+
+    - name: Comment evaluation results on PR
+      if: github.event_name == 'pull_request' && always()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+
+          // Find the latest run directory
+          const runsDir = 'runs';
+          if (fs.existsSync(runsDir)) {
+            const runDirs = fs.readdirSync(runsDir).filter(dir =>
+              fs.statSync(path.join(runsDir, dir)).isDirectory()
+            ).sort().reverse();
+
+            if (runDirs.length > 0) {
+              const latestRunDir = path.join(runsDir, runDirs[0], 'create_release_note_for_story');
+              const reportFile = path.join(latestRunDir, 'report.txt');
+
+              if (fs.existsSync(reportFile)) {
+                const report = fs.readFileSync(reportFile, 'utf8');
+                const shortReport = report.split('\n').slice(0, 25).join('\n');
+
+                github.rest.issues.createComment({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: `## 🤖 AI Evaluation Results\n\n\`\`\`\n${shortReport}\n\`\`\`\n\n*Full results available in the workflow artifacts.*`
+                });
+              }
+            }
+          }

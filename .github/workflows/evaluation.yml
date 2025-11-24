@@ -18,7 +18,6 @@ on:
 jobs:
   evaluate-ai-quality:
     runs-on: ubuntu-latest
-    if: ${{ secrets.OPENAI_API_KEY != '' }}
 
     steps:
     - uses: actions/checkout@v4
@@ -42,7 +41,20 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
+    - name: Check for OpenAI API Key
+      id: check-key
+      run: |
+        if [ -n "$OPENAI_API_KEY" ]; then
+          echo "has-key=true" >> $GITHUB_OUTPUT
+        else
+          echo "has-key=false" >> $GITHUB_OUTPUT
+          echo "⚠️ OPENAI_API_KEY not available - skipping evaluation tests"
+        fi
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
     - name: Run evaluation tests
+      if: steps.check-key.outputs.has-key == 'true'
       run: |
         python -m pytest tests/test_evaluation.py -v -s
       env:
@@ -51,7 +63,7 @@ jobs:
 
     - name: Upload evaluation results
       uses: actions/upload-artifact@v4
-      if: always()
+      if: steps.check-key.outputs.has-key == 'true' && always()
       with:
         name: evaluation-results
         path: |
@@ -59,7 +71,7 @@ jobs:
         retention-days: 30
 
     - name: Comment evaluation results on PR
-      if: github.event_name == 'pull_request' && always()
+      if: github.event_name == 'pull_request' && steps.check-key.outputs.has-key == 'true' && always()
       uses: actions/github-script@v6
       with:
         script: |

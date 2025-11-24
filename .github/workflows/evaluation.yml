@@ -15,6 +15,11 @@ on:
       - 'tests/data.jsonl'
   workflow_dispatch:  # Allow manual trigger
 
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
 jobs:
   evaluate-ai-quality:
     runs-on: ubuntu-latest
@@ -73,32 +78,46 @@ jobs:
     - name: Comment evaluation results on PR
       if: github.event_name == 'pull_request' && steps.check-key.outputs.has-key == 'true' && always()
       uses: actions/github-script@v6
+      continue-on-error: true
       with:
         script: |
-          const fs = require('fs');
-          const path = require('path');
+          try {
+            const fs = require('fs');
+            const path = require('path');
 
-          // Find the latest run directory
-          const runsDir = 'runs';
-          if (fs.existsSync(runsDir)) {
-            const runDirs = fs.readdirSync(runsDir).filter(dir =>
-              fs.statSync(path.join(runsDir, dir)).isDirectory()
-            ).sort().reverse();
+            // Find the latest run directory
+            const runsDir = 'runs';
+            if (fs.existsSync(runsDir)) {
+              const runDirs = fs.readdirSync(runsDir).filter(dir =>
+                fs.statSync(path.join(runsDir, dir)).isDirectory()
+              ).sort().reverse();
 
-            if (runDirs.length > 0) {
-              const latestRunDir = path.join(runsDir, runDirs[0], 'create_release_note_for_story');
-              const reportFile = path.join(latestRunDir, 'report.txt');
+              if (runDirs.length > 0) {
+                const latestRunDir = path.join(runsDir, runDirs[0], 'create_release_note_for_story');
+                const reportFile = path.join(latestRunDir, 'report.txt');
 
-              if (fs.existsSync(reportFile)) {
-                const report = fs.readFileSync(reportFile, 'utf8');
-                const shortReport = report.split('\n').slice(0, 25).join('\n');
+                if (fs.existsSync(reportFile)) {
+                  const report = fs.readFileSync(reportFile, 'utf8');
+                  const shortReport = report.split('\n').slice(0, 25).join('\n');
 
-                github.rest.issues.createComment({
-                  issue_number: context.issue.number,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  body: `## 🤖 AI Evaluation Results\n\n\`\`\`\n${shortReport}\n\`\`\`\n\n*Full results available in the workflow artifacts.*`
-                });
+                  await github.rest.issues.createComment({
+                    issue_number: context.issue.number,
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    body: `## 🤖 AI Evaluation Results\n\n\`\`\`\n${shortReport}\n\`\`\`\n\n*Full results available in the workflow artifacts.*`
+                  });
+
+                  console.log('✅ Successfully posted evaluation results to PR');
+                } else {
+                  console.log('⚠️ No evaluation report found');
+                }
+              } else {
+                console.log('⚠️ No evaluation runs found');
               }
+            } else {
+              console.log('⚠️ No runs directory found');
             }
+          } catch (error) {
+            console.log(`⚠️ Could not post PR comment: ${error.message}`);
+            console.log('This is not critical - evaluation results are still available in artifacts');
           }

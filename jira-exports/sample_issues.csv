@@ -1,4 +1,0 @@
-Issue key,Summary,Description,Labels,Issue Type,Status
-BPD-123,Fixed dashboard loading issue,Users were experiencing slow loading times on the main dashboard. This has been resolved by optimizing database queries.,bug,Bug,Done
-BPD-124,Added dark mode toggle,Implemented a new dark mode feature that allows users to switch between light and dark themes in the settings page.,enhancement,Story,Done
-BPD-125,WB Fixed whiteboard drawing tools,Resolved an issue where drawing tools in the whiteboard were not responding correctly to touch input.,whiteboard,Bug,Done

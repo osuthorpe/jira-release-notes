@@ -20,6 +20,7 @@ from zenpy.lib.api_objects.help_centre_objects import Article
 import pandas as pd
 from openai import OpenAI
 from dotenv import load_dotenv
+from vald8 import vald8
 
 # Load environment variables
 load_dotenv()
@@ -572,6 +573,42 @@ class AutomatedReleaseNotes:
         except Exception as e:
             logger.error(f"Automated workflow failed: {e}")
             raise
+
+
+
+
+# Create a module-level instance for Vald8 evaluation
+_generator_instance = None
+
+def _get_generator():
+    """Lazy initialization of generator instance."""
+    global _generator_instance
+    if _generator_instance is None:
+        _generator_instance = AutomatedReleaseNotes()
+    return _generator_instance
+
+def create_release_note_for_story(title: str, description: str, labels: List[str]) -> str:
+    """
+    Module-level function for Vald8 evaluation.
+    Delegates to the AutomatedReleaseNotes instance method.
+    """
+    generator = _get_generator()
+    return generator.create_release_note_for_story(title, description, labels)
+
+# Apply Vald8 decorator only if OpenAI API key is available
+if os.getenv('OPENAI_API_KEY'):
+    try:
+        create_release_note_for_story = vald8(
+            dataset="tests/data.jsonl",
+            tests=["custom_judge"],
+            judge_provider="openai",
+            judge_model="gpt-4o-mini"
+        )(create_release_note_for_story)
+    except Exception as e:
+        logger.warning(f"Failed to apply Vald8 decorator: {e}")
+        # Function remains undecorated but still works
+else:
+    logger.info("OPENAI_API_KEY not found - Vald8 evaluation will be skipped")
 
 
 def main():

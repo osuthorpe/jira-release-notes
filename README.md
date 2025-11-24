@@ -1,6 +1,6 @@
 # Automated JIRA Release Notes to Zendesk
 
-This tool automatically pulls release information from JIRA, generates formatted release notes using OpenAI, and creates articles in Zendesk.
+This tool automatically pulls release information from JIRA, generates formatted release notes using OpenAI, and creates articles for Zendesk.
 
 ## Setup
 

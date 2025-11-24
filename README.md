@@ -4,16 +4,28 @@ This tool automatically pulls release information from JIRA, generates formatted
 
 ## Setup
 
-1. **Install Dependencies**
+1. **Set Up Virtual Environment**
+   ```bash
+   # Create virtual environment
+   python3 -m venv venv
+
+   # Activate virtual environment
+   # On macOS/Linux:
+   source venv/bin/activate
+   # On Windows:
+   # venv\Scripts\activate
+   ```
+
+2. **Install Dependencies**
    ```bash
    pip install -r requirements.txt
    ```
 
-2. **Configure Environment Variables**
+3. **Configure Environment Variables**
    - Copy `.env.example` to `.env`
    - Fill in your API credentials and configuration
 
-3. **API Token Setup**
+4. **API Token Setup**
 
    **JIRA API Token:**
    - Go to https://id.atlassian.com/manage-profile/security/api-tokens

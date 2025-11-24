@@ -1,67 +1,33 @@
-import pytest
-from vald8 import Evaluator
-from automated_release_notes import AutomatedReleaseNotes
+import os
+import sys
 
-def test_release_notes_generation():
+# Add parent directory to path to import from automated_release_notes
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from automated_release_notes import evaluate_release_note_generation
+
+
+def test_release_note_quality():
     """
-    Test that release notes are generated correctly and meet quality standards.
+    Test release note generation quality using Vald8.
+    This test runs the decorated function's evaluation suite.
     """
-    # Initialize generator
-    generator = AutomatedReleaseNotes()
+    print("\nStarting Vald8 evaluation...")
     
-    # Mock data for testing
-    mock_issues = [
-        {
-            'key': 'PROJ-123',
-            'summary': 'Fix login bug',
-            'type': 'Bug',
-            'status': 'Done',
-            'description': 'Fixed an issue where users could not log in.'
-        },
-        {
-            'key': 'PROJ-124',
-            'summary': 'Add dark mode',
-            'type': 'Story',
-            'status': 'Done',
-            'description': 'Implemented dark mode for better user experience.'
-        }
-    ]
+    # Run the evaluation using the decorated function from production code
+    results = evaluate_release_note_generation.run_eval()
     
-    # Generate release notes (mocking the AI part if possible, or testing the structure)
-    # For this test, we'll assume the generator can produce a string output
-    # In a real scenario, we might want to mock the OpenAI call to avoid costs/latency
+    # Print summary
+    print(f"Passed: {results.get('passed', False)}")
+    if 'summary' in results:
+        print(f"Success Rate: {results['summary'].get('success_rate', 0):.1%}")
+    elif 'error' in results:
+        print(f"Error: {results['error']}")
     
-    # Note: This is a placeholder for where we would integrate the actual generation logic
-    # For now, we'll simulate a generated output to test Vald8 integration
-    generated_notes = """
-    # Release Notes
-    
-    ## New Features
-    - **Dark Mode**: Added dark mode support.
-    
-    ## Bug Fixes
-    - **Login**: Fixed login issue.
-    """
-    
-    # Initialize Vald8 evaluator
-    evaluator = Evaluator()
-    
-    # Define metrics to check
-    metrics = [
-        "completeness",  # Check if all issues are covered
-        "clarity",       # Check if the notes are easy to understand
-        "tone"           # Check if the tone is professional
-    ]
-    
-    # Run evaluation
-    results = evaluator.evaluate(generated_notes, context={"issues": mock_issues}, metrics=metrics)
-    
-    # Assertions
-    # Note: The actual structure of 'results' depends on Vald8's API
-    # This is a hypothetical usage pattern
-    assert results['completeness'].score > 0.8
-    assert results['clarity'].score > 0.8
-    assert results['tone'].score > 0.8
+    # Assert that the evaluation passed
+    assert results.get('passed', False), "Vald8 evaluation failed"
+
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    # Allow running directly for manual testing
+    test_release_note_quality()

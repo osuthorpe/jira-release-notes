@@ -20,6 +20,7 @@ from zenpy.lib.api_objects.help_centre_objects import Article
 import pandas as pd
 from openai import OpenAI
 from dotenv import load_dotenv
+from vald8 import vald8
 
 # Load environment variables
 load_dotenv()
@@ -572,6 +573,23 @@ class AutomatedReleaseNotes:
         except Exception as e:
             logger.error(f"Automated workflow failed: {e}")
             raise
+
+
+# Vald8 Evaluation Wrapper
+@vald8(dataset="tests/data.jsonl", tests=["custom_judge"], judge_provider="openai", judge_model="gpt-5.1")
+def evaluate_release_note_generation(issue: Dict[str, Any]) -> str:
+    """
+    Wrapper function for Vald8 evaluation.
+    Generates a release note for a single issue using the AutomatedReleaseNotes class.
+    """
+    # Initialize generator (this will use env vars for auth)
+    generator = AutomatedReleaseNotes()
+    
+    title = issue.get('summary', '')
+    description = issue.get('description', '')
+    labels = issue.get('labels', [])
+    
+    return generator.create_release_note_for_story(title, description, labels)
 
 
 def main():

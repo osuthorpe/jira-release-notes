@@ -1,0 +1,60 @@
+name: Merge Readiness Check
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  merge-gate:
+    name: Merge Gate
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.9
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.9"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Basic Import Test
+      run: |
+        python -c "
+        import automated_release_notes
+        print('✅ Core module imports successfully')
+        "
+      env:
+        OPENAI_API_KEY: ""
+
+    - name: Quick Syntax Check
+      run: |
+        python -m py_compile automated_release_notes.py
+        echo "✅ Python syntax is valid"
+
+    - name: Requirements Validation
+      run: |
+        pip check
+        echo "✅ Dependencies are compatible"
+
+    - name: Basic Test Coverage
+      run: |
+        python -m pytest tests/test_unit.py --tb=short -q
+        echo "✅ Core tests pass"
+      env:
+        OPENAI_API_KEY: ""
+
+    - name: Merge Safety Check
+      run: |
+        echo "✅ Repository is ready for safe merging"
+        echo "All basic quality gates have passed"

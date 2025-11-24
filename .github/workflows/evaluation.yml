@@ -29,7 +29,7 @@ jobs:
         python-version: "3.9"
 
     - name: Cache pip dependencies
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ~/.cache/pip
         key: ${{ runner.os }}-pip-evaluation-${{ hashFiles('**/requirements.txt') }}
@@ -50,7 +50,7 @@ jobs:
       continue-on-error: true
 
     - name: Upload evaluation results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: evaluation-results

@@ -3,6 +3,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Application data
+uploads/
+output/
+jira-exports/
+
 # C extensions
 *.so
 

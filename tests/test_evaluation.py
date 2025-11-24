@@ -13,8 +13,20 @@ def test_release_note_quality():
     Test release note generation quality using Vald8.
     This test runs the decorated function's evaluation suite.
     """
+    import os
+
+    # Skip test if no OpenAI API key is available
+    if not os.getenv('OPENAI_API_KEY'):
+        import pytest
+        pytest.skip("OPENAI_API_KEY not available - skipping evaluation test")
+
+    # Check if the function has the run_eval method (i.e., is decorated)
+    if not hasattr(create_release_note_for_story, 'run_eval'):
+        import pytest
+        pytest.skip("Function not decorated with Vald8 - evaluation test skipped")
+
     print("\nStarting Vald8 evaluation...")
-    
+
     # Run the evaluation using the decorated module-level function
     results = create_release_note_for_story.run_eval()
     

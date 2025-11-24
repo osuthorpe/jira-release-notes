@@ -37,6 +37,9 @@ jobs:
     - name: Run unit tests
       run: |
         python -m pytest tests/test_unit.py -v
+      env:
+        # Explicitly unset OpenAI API key for unit tests to ensure independence
+        OPENAI_API_KEY: ""
 
     - name: Run evaluation tests (allow failure)
       run: |

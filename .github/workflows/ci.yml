@@ -53,10 +53,16 @@ jobs:
     - name: Run unit tests (required)
       run: |
         python -m pytest tests/test_unit.py -v --tb=short
+      env:
+        # Explicitly unset OpenAI API key for unit tests to ensure independence
+        OPENAI_API_KEY: ""
 
     - name: Check if main module can be imported
       run: |
         python -c "import automated_release_notes; print('✓ Module imports successfully')"
+      env:
+        # Explicitly unset OpenAI API key for import test
+        OPENAI_API_KEY: ""
 
   compatibility-test:
     runs-on: ubuntu-latest
@@ -80,3 +86,6 @@ jobs:
     - name: Run unit tests
       run: |
         python -m pytest tests/test_unit.py -v
+      env:
+        # Explicitly unset OpenAI API key for unit tests to ensure independence
+        OPENAI_API_KEY: ""

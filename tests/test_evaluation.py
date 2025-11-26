@@ -16,9 +16,11 @@ def test_release_note_quality():
     import os
 
     # Skip test if no OpenAI API key is available
-    if not os.getenv('OPENAI_API_KEY'):
-        import pytest
-        pytest.skip("OPENAI_API_KEY not available - skipping evaluation test")
+    # Note: This is now handled by pytest_ignore_collect in conftest.py
+    # but we keep a check here just in case the file is collected anyway
+    # or if we want to be double sure, though the conftest hook is the primary mechanism.
+    # Actually, per instructions, we should remove the skip inside the function.
+    pass
 
     # Instantiate the generator
     generator = AutomatedReleaseNotes()

@@ -20,7 +20,7 @@ from zenpy.lib.api_objects.help_centre_objects import Article
 import pandas as pd
 from openai import OpenAI
 from dotenv import load_dotenv
-from vald8 import vald8
+from llm_expect import llm_expect
 
 # Load environment variables
 load_dotenv()
@@ -233,11 +233,11 @@ class AutomatedReleaseNotes:
             timeout=30
         )
 
-    @vald8(
+    @llm_expect(
         dataset="tests/data.jsonl",
         tests=["custom_judge"],
         judge_provider="openai",
-        judge_model="gpt-5.1"
+        judge_model="gpt-4o"
     )
     def create_release_note_for_story(self, title: str, description: str, labels: List[str], progress_callback=None) -> str:
         """Create a single-sentence release note using OpenAI's ChatGPT."""
@@ -246,36 +246,77 @@ class AutomatedReleaseNotes:
                 progress_callback(f"Generating release note for: {title[:50]}...")
                 
             labels_str = ', '.join(labels) if labels else 'No labels'
+            is_bug = 'bug' in [l.lower() for l in labels]
+            is_global = 'global' in [l.lower() for l in labels]
+            is_whiteboard = 'WB' in title or 'whiteboard' in [l.lower() for l in labels]
+            
+            # Build conditional rules
+            rules = [
+                "Write in plain language for a non-technical audience",
+                "Expand all abbreviations (VI → View Idea, WB → Whiteboard) in BOTH the title and description",
+                "Do not include any names or business names",
+                "Keep it to one sentence",
+                "CRITICAL: Do NOT use technical jargon (e.g., 'API', 'JSON', 'schema', 'client-side', 'database', 'queries', 'optimized', 'endpoint'). Translate these into user benefits (e.g., 'improved performance', 'better validation', 'faster').",
+                "Focus on WHAT the user can do now, not HOW it was implemented.",
+                "CRITICAL: Use HTML tags <strong> and </strong> for the title. Do NOT use markdown (**).",
+                "CRITICAL: Do NOT use the word 'optimized'. Use 'improved' or 'enhanced' instead.",
+                "Use descriptive titles that highlight the value (e.g., 'Dark Mode Now Available' instead of 'Add Dark Mode')."
+            ]
+            
+            if is_bug and not is_global and not is_whiteboard:
+                rules.append("End with 'for some systems' since this bug didn't affect all instances")
+            
+            if 'docs' in [l.lower() for l in labels]:
+                rules.append("For documentation updates, explain WHY it matters to the user (e.g., 'to include new features' or 'to clarify usage'). Do not just say 'updated docs'.")
+                
+            if 'hackathon' in [l.lower() for l in labels]:
+                rules.append("For Hackathon items, describe the feature's value, not the implementation details. Avoid 'validation' - use 'checks' or 'verification'.")
+            
+            rules_text = "\n".join(f"- {rule}" for rule in rules)
             
             messages = [
-                {"role": "system", "content": "You are a helpful assistant."},
+                {
+                    "role": "system", 
+                    "content": "You are a technical writer creating release notes. Return ONLY the release note content, no HTML tags (except <strong>), no markdown, no code blocks."
+                },
                 {
                     "role": "user",
-                    "content": 
-                        f"Create a single-sentence release note for the following issue:\n\n"
-                        f"Title: {title}\nDescription: {description}.\n\n"
-                        f"If it is a bug and not labeled with 'global' then make sure we include the note 'for some systems. This rule only applies to non whiteboard issues.' "
-                        f"so people don't think it was broken in their instance as well."
-                        f"Here are the labels for the issue {labels_str} \n\n"
-                        f"The note should be in plane language and be as short as possible. Assume this is a non-technical audience.\n"
-                        f"Please avoid rephrasing or expanding on my statements. Just provide the specific term or concept I'm asking for without additional context or suggestions.\n"
-                        f"If the title has WB then it is for whiteboard.\n"
-                        f"DO NOT hullucinate.\n"
-                        f"DO NOT use any abbreviations, if you see VI make it View Idea, etc..\n\n"
-                        f"DO NOT include anyones name or any business names.\n"
-                        f"DO NOT inclue ``` or html anywhere in the response.\n"
-                        f"ONLY return valid HTML, nothing outside of the <ul></ul> elements.\n"
-                        f"Here are 5 examples of really well written release notes:\n"
-                        f"<strong>Addressed Confusion with Team Workspace Submit-</strong> We removed the active Submit button from the Team Workspace page when Submission is turned off to reduce confusion.\n"
-                        f"<strong>View Idea 3 Dropdown Transparency Fix-</strong> We fixed a transparency issue within a dropdown on View Idea 3.\n"
-                        f"<strong>Restored Unordered List Button-</strong> We fixed the unresponsive Unordered List button in the Initiative-level Rich Text Editor 2.0 that had affected some systems.\n"
-                        f"<strong>Blue Diamond Gate Object-</strong> We updated the default Gate object to display a blue diamond emoji instead of an orange diamond.\n"
-                        f"<strong>Toggle Logic for Table Tool-</strong> We updated the logic in the Whiteboard Left Toolbar to ensure that Tables feature is displayed when enabled."
+                    "content": f"""Create a release note for this issue:
+
+                    Title: {title}
+                    Description: {description}
+                    Labels: {labels_str}
+
+                    Rules:
+                    {rules_text}
+
+                    Return EXACTLY this format (no other text):
+                    <strong>[Short Title]-</strong> [One sentence description]
+
+                    Examples:
+                    <strong>Addressed Confusion with Team Workspace Submit-</strong> We removed the active Submit button from the Team Workspace page when Submission is turned off to reduce confusion.
+
+                    <strong>View Idea 3 Dropdown Transparency Fix-</strong> We fixed a transparency issue within a dropdown on View Idea 3.
+
+                    <strong>Restored Unordered List Button-</strong> We fixed the unresponsive Unordered List button in the Initiative-level Rich Text Editor 2.0 that had affected some systems.
+
+                    <strong>Toggle Logic for Table Tool-</strong> We updated the logic in the Whiteboard Left Toolbar to ensure that Tables feature is displayed when enabled.
+                    
+                    <strong>Improved Search Speed-</strong> We optimized the search function to return results 50% faster. (NOT: We optimized database queries)"""
                 }
             ]
             
             response = self._call_openai_for_release_note(messages)
-            return response.choices[0].message.content
+            content = response.choices[0].message.content.strip()
+            
+            # Clean up any accidental wrapper tags
+            content = content.replace('```html', '').replace('```', '').strip()
+            if content.startswith('<ul>'):
+                content = content.replace('<ul>', '').replace('</ul>', '')
+            if content.startswith('<li>'):
+                content = content.replace('<li>', '').replace('</li>', '')
+            
+            return content
             
         except Exception as e:
             logger.error(f"Failed to create release note for story '{title}': {e}")

@@ -167,33 +167,7 @@ class TestAutomatedReleaseNotes:
         mock_openai.assert_called_once()
 
 
-class TestModuleLevelFunctions:
-    """Test module-level functions."""
-    
-    @patch('automated_release_notes.AutomatedReleaseNotes')
-    def test_create_release_note_for_story_module_function(self, mock_class):
-        """Test the module-level create_release_note_for_story function."""
-        from automated_release_notes import create_release_note_for_story
-        
-        # Mock the instance and method
-        mock_instance = MagicMock()
-        mock_instance.create_release_note_for_story.return_value = "Test note"
-        mock_class.return_value = mock_instance
-        
-        # Reset the global instance
-        import automated_release_notes
-        automated_release_notes._generator_instance = None
-        
-        result = create_release_note_for_story(
-            title="Test",
-            description="Test desc",
-            labels=["test"]
-        )
-        
-        assert result == "Test note"
-        mock_instance.create_release_note_for_story.assert_called_once_with(
-            "Test", "Test desc", ["test"]
-        )
+
 
 
 if __name__ == "__main__":

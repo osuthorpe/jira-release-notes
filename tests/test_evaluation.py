@@ -10,15 +10,17 @@ from automated_release_notes import AutomatedReleaseNotes
 
 def test_release_note_quality():
     """
-    Test release note generation quality using Vald8.
+    Test release note generation quality using llm-expect.
     This test runs the decorated function's evaluation suite.
     """
     import os
 
     # Skip test if no OpenAI API key is available
-    if not os.getenv('OPENAI_API_KEY'):
-        import pytest
-        pytest.skip("OPENAI_API_KEY not available - skipping evaluation test")
+    # Note: This is now handled by pytest_ignore_collect in conftest.py
+    # but we keep a check here just in case the file is collected anyway
+    # or if we want to be double sure, though the conftest hook is the primary mechanism.
+    # Actually, per instructions, we should remove the skip inside the function.
+    pass
 
     # Instantiate the generator
     generator = AutomatedReleaseNotes()
@@ -26,9 +28,9 @@ def test_release_note_quality():
     # Check if the function has the run_eval method (i.e., is decorated)
     if not hasattr(generator.create_release_note_for_story, 'run_eval'):
         import pytest
-        pytest.skip("Function not decorated with Vald8 - evaluation test skipped")
+        pytest.skip("Function not decorated with llm-expect - evaluation test skipped")
 
-    print("\nStarting Vald8 evaluation...")
+    print("\nStarting llm-expect evaluation...")
 
     # Run the evaluation using the decorated instance method
     results = generator.create_release_note_for_story.run_eval()
@@ -49,14 +51,18 @@ def test_release_note_quality():
         print(f"\nTest Results:")
         for test in results['tests']:
             print(f"  {test.get('id', 'unknown')}: {test.get('passed', False)}")
-            if 'error' in test:
-                print(f"    Error: {test['error']}")
+            if not test.get('passed', False):
+                print(f"    ❌ FAILED: {test.get('id', 'unknown')}")
+                if 'error' in test:
+                    print(f"    Error: {test['error']}")
+                if 'reason' in test:
+                    print(f"    Reason: {test['reason']}")
     
     if 'error' in results:
         print(f"\nError: {results['error']}")
     
     # Assert that the evaluation passed
-    assert results.get('passed', False), "Vald8 evaluation failed"
+    assert results.get('passed', False), "llm-expect evaluation failed"
 
 
 if __name__ == "__main__":

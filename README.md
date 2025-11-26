@@ -66,7 +66,7 @@ This tool automatically pulls release information from JIRA, generates formatted
 
 ## Testing
 
-We use `pytest` and `vald8` for testing and evaluation.
+We use `pytest` and `llm-expect` for testing and evaluation.
 
 ### Running Tests
 ```bash
@@ -74,7 +74,7 @@ pytest
 ```
 
 ### Quality Evaluation
-The `tests/test_evaluation.py` script uses `vald8` to evaluate the quality of generated release notes, checking for:
+The `tests/test_evaluation.py` script uses `llm-expect` to evaluate the quality of generated release notes, checking for:
 - Completeness
 - Clarity
 - Tone

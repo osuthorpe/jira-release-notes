@@ -5,7 +5,7 @@ import json
 # Add parent directory to path to import from automated_release_notes
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from automated_release_notes import create_release_note_for_story
+from automated_release_notes import AutomatedReleaseNotes
 
 
 def test_release_note_quality():
@@ -20,15 +20,18 @@ def test_release_note_quality():
         import pytest
         pytest.skip("OPENAI_API_KEY not available - skipping evaluation test")
 
+    # Instantiate the generator
+    generator = AutomatedReleaseNotes()
+
     # Check if the function has the run_eval method (i.e., is decorated)
-    if not hasattr(create_release_note_for_story, 'run_eval'):
+    if not hasattr(generator.create_release_note_for_story, 'run_eval'):
         import pytest
         pytest.skip("Function not decorated with Vald8 - evaluation test skipped")
 
     print("\nStarting Vald8 evaluation...")
 
-    # Run the evaluation using the decorated module-level function
-    results = create_release_note_for_story.run_eval()
+    # Run the evaluation using the decorated instance method
+    results = generator.create_release_note_for_story.run_eval()
     
     # Print detailed results
     print(f"\nPassed: {results.get('passed', False)}")

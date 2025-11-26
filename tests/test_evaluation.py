@@ -49,8 +49,12 @@ def test_release_note_quality():
         print(f"\nTest Results:")
         for test in results['tests']:
             print(f"  {test.get('id', 'unknown')}: {test.get('passed', False)}")
-            if 'error' in test:
-                print(f"    Error: {test['error']}")
+            if not test.get('passed', False):
+                print(f"    ❌ FAILED: {test.get('id', 'unknown')}")
+                if 'error' in test:
+                    print(f"    Error: {test['error']}")
+                if 'reason' in test:
+                    print(f"    Reason: {test['reason']}")
     
     if 'error' in results:
         print(f"\nError: {results['error']}")

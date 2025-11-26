@@ -10,7 +10,7 @@ from automated_release_notes import AutomatedReleaseNotes
 
 def test_release_note_quality():
     """
-    Test release note generation quality using Vald8.
+    Test release note generation quality using llm-expect.
     This test runs the decorated function's evaluation suite.
     """
     import os
@@ -26,9 +26,9 @@ def test_release_note_quality():
     # Check if the function has the run_eval method (i.e., is decorated)
     if not hasattr(generator.create_release_note_for_story, 'run_eval'):
         import pytest
-        pytest.skip("Function not decorated with Vald8 - evaluation test skipped")
+        pytest.skip("Function not decorated with llm-expect - evaluation test skipped")
 
-    print("\nStarting Vald8 evaluation...")
+    print("\nStarting llm-expect evaluation...")
 
     # Run the evaluation using the decorated instance method
     results = generator.create_release_note_for_story.run_eval()
@@ -60,7 +60,7 @@ def test_release_note_quality():
         print(f"\nError: {results['error']}")
     
     # Assert that the evaluation passed
-    assert results.get('passed', False), "Vald8 evaluation failed"
+    assert results.get('passed', False), "llm-expect evaluation failed"
 
 
 if __name__ == "__main__":

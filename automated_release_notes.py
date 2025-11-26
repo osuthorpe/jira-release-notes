@@ -20,7 +20,7 @@ from zenpy.lib.api_objects.help_centre_objects import Article
 import pandas as pd
 from openai import OpenAI
 from dotenv import load_dotenv
-from vald8 import vald8
+from llm_expect import llm_expect
 
 # Load environment variables
 load_dotenv()
@@ -233,7 +233,7 @@ class AutomatedReleaseNotes:
             timeout=30
         )
 
-    @vald8(
+    @llm_expect(
         dataset="tests/data.jsonl",
         tests=["custom_judge"],
         judge_provider="openai",

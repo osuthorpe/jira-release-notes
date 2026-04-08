@@ -275,7 +275,8 @@ def generate(csv_path: str = None):
     # Publish to Zendesk if configured
     zendesk_url = publish_to_zendesk(title, body)
     if zendesk_url:
-        print(f"Zendesk article: {zendesk_url}")
+        print(f"\nZendesk draft created: \033]8;;{zendesk_url}\033\\{zendesk_url}\033]8;;\033\\")
+        post_to_slack(title, zendesk_url)
 
     return file_path
 
@@ -290,14 +291,19 @@ def publish_to_zendesk(title: str, body: str) -> str:
         return None
 
     url = f"https://{subdomain}.zendesk.com/api/v2/help_center/sections/{section_id}/articles"
+    permission_group_id = os.getenv('ZENDESK_PERMISSION_GROUP_ID')
     payload = {
         "article": {
             "title": title,
             "body": body,
             "locale": "en-us",
             "draft": True,
-        }
+            "user_segment_id": None,
+        },
+        "notify_subscribers": False,
     }
+    if permission_group_id:
+        payload["article"]["permission_group_id"] = int(permission_group_id)
 
     logger.info(f"Publishing to Zendesk: {title}")
     response = requests.post(
@@ -306,12 +312,36 @@ def publish_to_zendesk(title: str, body: str) -> str:
         auth=(f"{email}/token", token),
         headers={"Content-Type": "application/json"},
     )
-    response.raise_for_status()
+    if not response.ok:
+        logger.error(f"Zendesk error: {response.status_code} - {response.text}")
+        response.raise_for_status()
 
     article_id = response.json()["article"]["id"]
     article_url = f"https://{subdomain}.zendesk.com/hc/en-us/articles/{article_id}"
     logger.info(f"Zendesk article created: {article_url}")
     return article_url
+
+
+def post_to_slack(title: str, zendesk_url: str):
+    token = os.getenv('SLACK_BOT_TOKEN')
+    channel = os.getenv('SLACK_CHANNEL', 'C03BD30JG58')
+
+    if not token:
+        return
+
+    response = requests.post(
+        "https://slack.com/api/chat.postMessage",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "channel": channel,
+            "text": f"*{title}*\n{zendesk_url}",
+        },
+    )
+    data = response.json()
+    if data.get("ok"):
+        print(f"Posted to Slack: #{channel}")
+    else:
+        logger.error(f"Slack error: {data.get('error')}")
 
 
 if __name__ == "__main__":

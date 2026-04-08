@@ -290,36 +290,60 @@ def publish_to_zendesk(title: str, body: str) -> str:
     if not all([subdomain, email, token, section_id]):
         return None
 
-    url = f"https://{subdomain}.zendesk.com/api/v2/help_center/sections/{section_id}/articles"
+    auth = (f"{email}/token", token)
+    headers = {"Content-Type": "application/json"}
     permission_group_id = os.getenv('ZENDESK_PERMISSION_GROUP_ID')
-    payload = {
-        "article": {
-            "title": title,
-            "body": body,
-            "locale": "en-us",
-            "draft": True,
-            "user_segment_id": None,
-        },
-        "notify_subscribers": False,
-    }
-    if permission_group_id:
-        payload["article"]["permission_group_id"] = int(permission_group_id)
 
-    logger.info(f"Publishing to Zendesk: {title}")
-    response = requests.post(
-        url,
-        json=payload,
-        auth=(f"{email}/token", token),
-        headers={"Content-Type": "application/json"},
-    )
+    # Check if article with same title already exists in this section
+    existing_id = find_existing_article(subdomain, auth, section_id, title)
+
+    if existing_id:
+        # Update existing article
+        url = f"https://{subdomain}.zendesk.com/api/v2/help_center/articles/{existing_id}/translations/en-us"
+        payload = {"translation": {"body": body, "title": title}}
+        logger.info(f"Updating existing Zendesk article {existing_id}: {title}")
+        response = requests.put(url, json=payload, auth=auth, headers=headers)
+    else:
+        # Create new article
+        url = f"https://{subdomain}.zendesk.com/api/v2/help_center/sections/{section_id}/articles"
+        payload = {
+            "article": {
+                "title": title,
+                "body": body,
+                "locale": "en-us",
+                "draft": True,
+                "user_segment_id": None,
+            },
+            "notify_subscribers": False,
+        }
+        if permission_group_id:
+            payload["article"]["permission_group_id"] = int(permission_group_id)
+        logger.info(f"Creating new Zendesk article: {title}")
+        response = requests.post(url, json=payload, auth=auth, headers=headers)
+
     if not response.ok:
         logger.error(f"Zendesk error: {response.status_code} - {response.text}")
         response.raise_for_status()
 
-    article_id = response.json()["article"]["id"]
+    if existing_id:
+        article_id = existing_id
+    else:
+        article_id = response.json()["article"]["id"]
+
     article_url = f"https://{subdomain}.zendesk.com/hc/en-us/articles/{article_id}"
-    logger.info(f"Zendesk article created: {article_url}")
+    logger.info(f"Zendesk article {'updated' if existing_id else 'created'}: {article_url}")
     return article_url
+
+
+def find_existing_article(subdomain, auth, section_id, title):
+    url = f"https://{subdomain}.zendesk.com/api/v2/help_center/sections/{section_id}/articles"
+    response = requests.get(url, auth=auth)
+    if not response.ok:
+        return None
+    for article in response.json().get("articles", []):
+        if article["title"] == title:
+            return article["id"]
+    return None
 
 
 def post_to_slack(title: str, zendesk_url: str):

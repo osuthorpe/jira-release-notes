@@ -1,11 +1,14 @@
+VENV = . venv/bin/activate &&
+
 install:
-	pip install -r requirements.txt
+	python3 -m venv venv
+	$(VENV) pip install -r requirements.txt
 
 run:
-	python automated_release_notes.py
+	$(VENV) python automated_release_notes.py
 
 eval:
-	python -c "from automated_release_notes import create_release_note; results = create_release_note.run_eval(); print('Passed:', results['passed'])"
+	$(VENV) python -c "from automated_release_notes import create_release_note; results = create_release_note.run_eval(); print('Passed:', results['passed'])"
 
 setup:
 	cp -n .env.example .env

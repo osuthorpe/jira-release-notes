@@ -1,11 +1,6 @@
 pandas>=2.0.0
 openai>=1.0.0
-requests>=2.28.0
-jira>=3.4.0
-zenpy>=2.0.0
 python-dotenv>=1.0.0
-celery>=5.3.0
-redis>=4.5.0
-beautifulsoup4>=4.12.0
+jira>=3.4.0
+requests>=2.28.0
 llm-expect>=0.1.9
-pytest>=7.0.0

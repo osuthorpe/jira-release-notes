@@ -186,3 +186,7 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 jira-exports/.DS_Store
+.DS_Store
+uploads/
+output/
+jira-exports/

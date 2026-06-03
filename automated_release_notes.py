@@ -80,7 +80,29 @@ def find_latest_csv() -> str:
     return max(csv_files, key=os.path.getmtime)
 
 
-def fetch_jira_issues() -> List[Dict[str, Any]]:
+def parse_version_date(fix_version: str) -> datetime:
+    """Parse a fix-version string like '06-01-2026' or '06-01-26' into a date."""
+    for fmt in ('%m-%d-%Y', '%m-%d-%y'):
+        try:
+            return datetime.strptime(fix_version, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"Unrecognized fix version date format: {fix_version!r}")
+
+
+def get_fix_version_env() -> str:
+    """Read the fix version from the environment, accepting upper- or lowercase var name."""
+    return os.getenv('FIX_VERSION') or os.getenv('fix_version')
+
+
+def parse_versions(raw: str) -> List[str]:
+    """Split a comma-separated FIX_VERSION value into a clean list of versions."""
+    if not raw:
+        return []
+    return [v.strip() for v in raw.split(',') if v.strip()]
+
+
+def fetch_jira_issues(fix_versions: List[str] = None) -> List[Dict[str, Any]]:
     server = os.getenv('JIRA_SERVER')
     username = os.getenv('JIRA_USERNAME')
     token = os.getenv('JIRA_API_TOKEN')
@@ -93,9 +115,11 @@ def fetch_jira_issues() -> List[Dict[str, Any]]:
     client = JIRA(server=server, basic_auth=(username, token))
 
     if not jql:
-        fix_version = datetime.today().strftime('%m-%d-%Y')
+        if not fix_versions:
+            fix_versions = [datetime.today().strftime('%m-%d-%Y')]
+        version_list = ', '.join(f'"{v}"' for v in fix_versions)
         jql = (f'project = "BPD" AND labels = Release_Notes '
-               f'AND fixVersion = "{fix_version}" '
+               f'AND fixVersion in ({version_list}) '
                f'ORDER BY key DESC, created DESC')
 
     logger.info(f"Running JQL: {jql}")
@@ -209,8 +233,11 @@ def categorize_notes(client, release_notes: str) -> str:
         return f"<p><strong>General bug fixes and enhancements</strong></p><ul>{release_notes}</ul>"
 
 
-def generate(csv_path: str = None):
-    """Generate release notes. Pulls from JIRA API if configured, otherwise uses CSV."""
+def generate(csv_path: str = None, fix_versions: List[str] = None):
+    """Generate one combined release-notes page across the given fix versions.
+
+    Pulls from JIRA API if configured, otherwise uses CSV.
+    """
     api_key = os.getenv('OPENAI_API_KEY')
     if not api_key:
         raise ValueError("OPENAI_API_KEY not set in .env file")
@@ -221,7 +248,7 @@ def generate(csv_path: str = None):
 
     # Try JIRA API first if creds are set (and no explicit CSV given)
     if csv_path is None:
-        issues = fetch_jira_issues()
+        issues = fetch_jira_issues(fix_versions)
         if issues:
             print(f"Pulled {len(issues)} issues from JIRA API")
 
@@ -250,8 +277,13 @@ def generate(csv_path: str = None):
     print("Categorizing...")
     categorized = categorize_notes(client, all_notes)
 
-    # Build HTML
-    day_of_week, formatted_date = format_date()
+    # Build HTML — use the most recent fix version date if set, else today
+    fix_versions = fix_versions or parse_versions(get_fix_version_env())
+    if fix_versions:
+        release_date = max(parse_version_date(v) for v in fix_versions)
+    else:
+        release_date = datetime.today()
+    day_of_week, formatted_date = format_date(release_date)
     title = f"Product Release Notes - {formatted_date}"
 
     body = f"""<p>Our latest product release took effect <strong>{day_of_week}, {formatted_date}.</strong> This post may be different from the release notes received via email.</p>
@@ -262,7 +294,7 @@ def generate(csv_path: str = None):
     # Save
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
-    filename = f"{safe_title}_{datetime.now().strftime('%m_%d_%Y')}.html"
+    filename = f"{safe_title}_{release_date.strftime('%m_%d_%Y')}.html"
     file_path = os.path.join(OUTPUT_DIR, filename)
 
     full_html = body
@@ -368,5 +400,77 @@ def post_to_slack(title: str, zendesk_url: str):
         logger.error(f"Slack error: {data.get('error')}")
 
 
+def test_connections():
+    """Verify access to JIRA, Zendesk, and Slack."""
+    ok = True
+
+    # JIRA
+    server = os.getenv('JIRA_SERVER')
+    username = os.getenv('JIRA_USERNAME')
+    token = os.getenv('JIRA_API_TOKEN')
+    if not all([server, username, token]):
+        print("[SKIP] JIRA  — creds not set")
+    else:
+        try:
+            client = JIRA(server=server, basic_auth=(username, token))
+            user = client.myself()
+            print(f"[OK]   JIRA  — {user.get('displayName')} <{user.get('emailAddress')}>")
+        except Exception as e:
+            print(f"[FAIL] JIRA  — {e}")
+            ok = False
+
+    # Zendesk
+    subdomain = os.getenv('ZENDESK_SUBDOMAIN')
+    email = os.getenv('ZENDESK_EMAIL')
+    zd_token = os.getenv('ZENDESK_API_TOKEN')
+    section_id = os.getenv('ZENDESK_SECTION_ID')
+    if not all([subdomain, email, zd_token, section_id]):
+        print("[SKIP] Zendesk — creds not set")
+    else:
+        try:
+            url = f"https://{subdomain}.zendesk.com/api/v2/help_center/sections/{section_id}.json"
+            r = requests.get(url, auth=(f"{email}/token", zd_token), timeout=10)
+            if r.ok:
+                section = r.json().get('section', {})
+                print(f"[OK]   Zendesk — section {section_id}: {section.get('name')}")
+            else:
+                print(f"[FAIL] Zendesk — {r.status_code}: {r.text}")
+                ok = False
+        except Exception as e:
+            print(f"[FAIL] Zendesk — {e}")
+            ok = False
+
+    # Slack
+    slack_token = os.getenv('SLACK_BOT_TOKEN')
+    channel = os.getenv('SLACK_CHANNEL')
+    if not slack_token:
+        print("[SKIP] Slack — token not set")
+    else:
+        try:
+            r = requests.post(
+                "https://slack.com/api/auth.test",
+                headers={"Authorization": f"Bearer {slack_token}"},
+                timeout=10,
+            )
+            data = r.json()
+            if data.get("ok"):
+                print(f"[OK]   Slack — bot {data.get('user')} in {data.get('team')} (channel: {channel})")
+            else:
+                print(f"[FAIL] Slack — {data.get('error')}")
+                ok = False
+        except Exception as e:
+            print(f"[FAIL] Slack — {e}")
+            ok = False
+
+    return ok
+
+
 if __name__ == "__main__":
-    generate()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        sys.exit(0 if test_connections() else 1)
+
+    versions = parse_versions(get_fix_version_env())
+    if len(versions) > 1:
+        print(f"Combining {len(versions)} versions into one page: {', '.join(versions)}")
+    generate(fix_versions=versions or None)

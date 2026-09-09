@@ -139,6 +139,12 @@ def fetch_jira_issues(fix_versions: List[str] = None) -> List[Dict[str, Any]]:
         })
 
     logger.info(f"Fetched {len(issues)} issues from JIRA")
+    if not issues:
+        raise RuntimeError(
+            f"JIRA returned 0 issues for JQL: {jql}\n"
+            "Refusing to fall back to a CSV export. Check that the tickets have the "
+            "Release_Notes label and the correct fix version, then re-run."
+        )
     return issues
 
 
@@ -236,7 +242,8 @@ def categorize_notes(client, release_notes: str) -> str:
 def generate(csv_path: str = None, fix_versions: List[str] = None):
     """Generate one combined release-notes page across the given fix versions.
 
-    Pulls from JIRA API if configured, otherwise uses CSV.
+    Pulls from the JIRA API if configured (and fails if it matches no issues);
+    uses the newest CSV in jira-exports/ only when JIRA creds are not set.
     """
     api_key = os.getenv('OPENAI_API_KEY')
     if not api_key:
@@ -246,14 +253,17 @@ def generate(csv_path: str = None, fix_versions: List[str] = None):
 
     issues = None
 
-    # Try JIRA API first if creds are set (and no explicit CSV given)
+    # Use the JIRA API when creds are set (and no explicit CSV given).
+    # fetch_jira_issues returns None only when creds are missing; it raises
+    # if JIRA is reachable but matches nothing, so we never silently publish
+    # a stale CSV export.
     if csv_path is None:
         issues = fetch_jira_issues(fix_versions)
-        if issues:
+        if issues is not None:
             print(f"Pulled {len(issues)} issues from JIRA API")
 
-    # Fall back to CSV
-    if not issues:
+    # CSV is only used when JIRA creds are not configured or a CSV was passed explicitly
+    if issues is None:
         if csv_path is None:
             csv_path = find_latest_csv()
         if csv_path is None:

@@ -200,6 +200,6 @@ Posted to Slack: #C03BD30JG58
 | `OPENAI_API_KEY not set` | Open `.env` and make sure the OpenAI key line is filled in (no quotes needed) |
 | `[FAIL] JIRA` in `make test` | Re-check `JIRA_SERVER` (full `https://...` address), your email, and the API token. Tokens expire — create a fresh one if needed |
 | `[FAIL] Zendesk` | Re-check the subdomain, email, token, and section ID. Confirm **Token access** is enabled in the Zendesk Admin Center |
-| It says "Fetched 0 issues" | The Jira tickets are missing something — check Project = **BPD**, label = **Release_Notes**, and the Fix Version date matches exactly what you typed in the command |
+| It stops with `JIRA returned 0 issues` | The run fails on purpose rather than publishing stale notes. The Jira tickets are missing something — check Project = **BPD**, label = **Release_Notes**, and the Fix Version date matches exactly what you typed in the command. Fix the tickets and run again |
 | Slack message didn't appear | Make sure the bot was invited to the channel and `SLACK_CHANNEL` is the channel **ID** (starts with `C`), not the channel name |
 | No Jira access at all | Export the tickets from Jira as a CSV, drop the file into the `jira-exports/` folder, and run `make run` — it uses the newest CSV automatically |

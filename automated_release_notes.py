@@ -2,485 +2,612 @@
 """
 JIRA Release Notes Generator
 
-Drop a JIRA CSV export into jira-exports/, run this script, get HTML in output/.
+Pulls the tickets for one or more fix versions from JIRA, rewrites each one as a
+short plain-language release note with OpenAI, groups the notes into sections,
+saves the page as HTML in output/, and, when configured, creates a Zendesk draft
+article and posts the link to Slack.
+
+Usage:
+    python automated_release_notes.py                        # today's date as the fix version
+    python automated_release_notes.py 06-12-2026             # one fix version
+    python automated_release_notes.py 06-12-2026 06-05-2026  # several versions on one page
+    python automated_release_notes.py --dry-run 06-12-2026   # generate only; skip Zendesk and Slack
+    python automated_release_notes.py test                   # check access to each service
+
+FIX_VERSION may also be given as an environment variable (comma-separated for several).
 """
 
-import os
-import glob
-import re
-import time
+from __future__ import annotations
+
+import html
+import json
 import logging
+import os
+import re
+import sys
+from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Dict, Any
-import pandas as pd
-from openai import OpenAI
+from pathlib import Path
+
+import requests
 from dotenv import load_dotenv
 from jira import JIRA
-import requests
 from llm_expect import llm_expect
+from openai import OpenAI
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+
+class _CleanFormatter(logging.Formatter):
+    """Plain lines for normal progress; a level prefix only for warnings and errors."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        prefix = "" if record.levelno < logging.WARNING else f"{record.levelname}: "
+        return prefix + super().format(record)
+
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(_CleanFormatter("%(message)s"))
+logging.basicConfig(level=logging.WARNING, handlers=[_handler])  # quiet third-party libraries
+log = logging.getLogger("release_notes")
+log.setLevel(os.getenv("LOG_LEVEL", "INFO"))
+
+BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = BASE_DIR / "output"
+EVALS_DIR = BASE_DIR / "evals"
+
+HTTP_TIMEOUT = 30  # seconds, applied to every Zendesk and Slack request
+DEFAULT_MODEL = "gpt-4o"
+FIX_VERSION_FORMATS = ("%m-%d-%Y", "%m-%d-%y")
+
+# Which tickets count as release notes. Set JIRA_JQL_QUERY in .env to replace the whole query.
+JIRA_PROJECT = "BPD"
+JIRA_LABEL = "Release_Notes"
+
+# Sections on the finished page, in display order. The model assigns each note to exactly
+# one of these; sections with no notes are left out of the page.
+GENERAL_SECTION = "General Bug Fixes and Enhancements"
+SECTIONS = (GENERAL_SECTION, "Project Room", "Whiteboard", "Hackathon")
+
+SUPPORT_PORTAL_URL = (
+    "https://support.brightidea.com/hc/en-us/sections/200825397-Product-Release-Notes"
 )
-logger = logging.getLogger(__name__)
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-JIRA_EXPORTS_DIR = os.path.join(BASE_DIR, 'jira-exports')
-OUTPUT_DIR = os.path.join(BASE_DIR, 'output')
-EVALS_DIR = os.path.join(BASE_DIR, 'evals')
 
 
-def retry(max_retries=3, delay=2, backoff=2):
-    """Retry decorator with exponential backoff."""
-    def decorator(func):
-        def wrapper(*args, **kwargs):
-            retries = 0
-            current_delay = delay
-            while retries < max_retries:
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    retries += 1
-                    if retries >= max_retries:
-                        raise
-                    logger.warning(f"Attempt {retries} failed: {e}. Retrying in {current_delay}s...")
-                    time.sleep(current_delay)
-                    current_delay *= backoff
-        return wrapper
-    return decorator
+@dataclass
+class Issue:
+    key: str
+    summary: str
+    description: str
+    issue_type: str
+    labels: list[str]
 
 
-def strip_code_fences(text: str) -> str:
-    return re.sub(r'```\w*\n?', '', text).strip()
+# --- Fix versions and dates -----------------------------------------------------------------
 
 
-def get_day_suffix(day: int) -> str:
-    if 4 <= day <= 20 or 24 <= day <= 30:
-        return "th"
-    return ["st", "nd", "rd"][day % 10 - 1]
-
-
-def format_date(date_obj: datetime = None) -> tuple:
-    if date_obj is None:
-        date_obj = datetime.today()
-    day = date_obj.day
-    month = date_obj.strftime("%B")
-    year = date_obj.year
-    day_of_week = date_obj.strftime("%A")
-    return day_of_week, f"{month} {day}{get_day_suffix(day)}, {year}"
-
-
-def find_latest_csv() -> str:
-    csv_files = glob.glob(os.path.join(JIRA_EXPORTS_DIR, '*.csv'))
-    if not csv_files:
-        return None
-    return max(csv_files, key=os.path.getmtime)
+def parse_versions(raw: str | None) -> list[str]:
+    """Split a comma-separated FIX_VERSION value into a clean list."""
+    if not raw:
+        return []
+    return [v.strip() for v in raw.split(",") if v.strip()]
 
 
 def parse_version_date(fix_version: str) -> datetime:
-    """Parse a fix-version string like '06-01-2026' or '06-01-26' into a date."""
-    for fmt in ('%m-%d-%Y', '%m-%d-%y'):
+    """Turn a fix version such as '06-12-2026' or '06-12-26' into a date."""
+    for fmt in FIX_VERSION_FORMATS:
         try:
             return datetime.strptime(fix_version, fmt)
         except ValueError:
             continue
-    raise ValueError(f"Unrecognized fix version date format: {fix_version!r}")
+    raise ValueError(
+        f"Fix version {fix_version!r} is not a date in MM-DD-YYYY form (for example 06-12-2026)."
+    )
 
 
-def get_fix_version_env() -> str:
-    """Read the fix version from the environment, accepting upper- or lowercase var name."""
-    return os.getenv('FIX_VERSION') or os.getenv('fix_version')
+def day_suffix(day: int) -> str:
+    if 11 <= day <= 13:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
 
 
-def parse_versions(raw: str) -> List[str]:
-    """Split a comma-separated FIX_VERSION value into a clean list of versions."""
-    if not raw:
-        return []
-    return [v.strip() for v in raw.split(',') if v.strip()]
+def long_date(date: datetime) -> str:
+    """'June 12th, 2026'"""
+    return f"{date:%B} {date.day}{day_suffix(date.day)}, {date.year}"
 
 
-def fetch_jira_issues(fix_versions: List[str] = None) -> List[Dict[str, Any]]:
-    server = os.getenv('JIRA_SERVER')
-    username = os.getenv('JIRA_USERNAME')
-    token = os.getenv('JIRA_API_TOKEN')
-    jql = os.getenv('JIRA_JQL_QUERY')
+# --- JIRA -----------------------------------------------------------------------------------
 
-    if not all([server, username, token]):
-        return None
 
-    logger.info(f"Connecting to JIRA: {server}")
+def jira_credentials() -> tuple[str, str, str] | None:
+    server = os.getenv("JIRA_SERVER")
+    username = os.getenv("JIRA_USERNAME")
+    token = os.getenv("JIRA_API_TOKEN")
+    if server and username and token:
+        return server, username, token
+    return None
+
+
+def build_jql(fix_versions: list[str]) -> str:
+    """The default ticket query. Versions must be dates (digits and dashes) so the JQL is safe."""
+    for version in fix_versions:
+        if not re.fullmatch(r"[\d-]+", version):
+            raise ValueError(f"Fix version {version!r} may only contain digits and dashes.")
+    versions = ", ".join(f'"{v}"' for v in fix_versions)
+    return (
+        f'project = "{JIRA_PROJECT}" AND labels = {JIRA_LABEL} '
+        f"AND fixVersion in ({versions}) ORDER BY key DESC"
+    )
+
+
+def plain_text(value: object) -> str:
+    """JIRA descriptions arrive as text (API v2) or a document tree (API v3). Flatten either."""
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        own = value.get("text", "")
+        children = " ".join(plain_text(child) for child in value.get("content", []))
+        return f"{own} {children}".strip()
+    if isinstance(value, list):
+        return " ".join(plain_text(item) for item in value)
+    return str(value)
+
+
+def fetch_jira_issues(fix_versions: list[str]) -> list[Issue]:
+    """Every ticket matching the query. Fails, rather than returning nothing, on an empty result."""
+    creds = jira_credentials()
+    if creds is None:
+        raise RuntimeError("JIRA_SERVER, JIRA_USERNAME and JIRA_API_TOKEN must all be set in .env.")
+    server, username, token = creds
+    jql = os.getenv("JIRA_JQL_QUERY") or build_jql(fix_versions)
+
+    log.info("Connecting to JIRA at %s", server)
     client = JIRA(server=server, basic_auth=(username, token))
-
-    if not jql:
-        if not fix_versions:
-            fix_versions = [datetime.today().strftime('%m-%d-%Y')]
-        version_list = ', '.join(f'"{v}"' for v in fix_versions)
-        jql = (f'project = "BPD" AND labels = Release_Notes '
-               f'AND fixVersion in ({version_list}) '
-               f'ORDER BY key DESC, created DESC')
-
-    logger.info(f"Running JQL: {jql}")
+    log.info("Running JQL: %s", jql)
     results = client.search_issues(
-        jql, maxResults=100,
-        fields='summary,description,labels,issuetype,status'
+        jql,
+        maxResults=False,  # follow every page instead of stopping at the first
+        fields="summary,description,labels,issuetype",
     )
 
     issues = []
-    for issue in results:
-        labels = [str(l) for l in issue.fields.labels] if issue.fields.labels else []
-        issues.append({
-            'key': issue.key,
-            'summary': issue.fields.summary,
-            'description': issue.fields.description or '',
-            'labels': labels,
-        })
+    for item in results:
+        fields = item.raw.get("fields", {})
+        issues.append(
+            Issue(
+                key=item.key,
+                summary=fields.get("summary") or "",
+                description=plain_text(fields.get("description")),
+                issue_type=(fields.get("issuetype") or {}).get("name") or "",
+                labels=[str(label) for label in fields.get("labels") or []],
+            )
+        )
 
-    logger.info(f"Fetched {len(issues)} issues from JIRA")
     if not issues:
         raise RuntimeError(
-            f"JIRA returned 0 issues for JQL: {jql}\n"
-            "Refusing to fall back to a CSV export. Check that the tickets have the "
-            "Release_Notes label and the correct fix version, then re-run."
+            f"JIRA returned 0 issues for: {jql}\n"
+            f"Check that the tickets have the {JIRA_LABEL} label and the right fix version, "
+            "then re-run."
         )
+    log.info("Fetched %d issues from JIRA", len(issues))
     return issues
 
 
-def read_csv(csv_path: str) -> List[Dict[str, Any]]:
-    logger.info(f"Reading: {csv_path}")
-    df = pd.read_csv(csv_path)
-    issues = []
-    for _, row in df.iterrows():
-        issues.append({
-            'key': row.get('Issue key', 'N/A'),
-            'summary': row.get('Summary', ''),
-            'description': row.get('Description', ''),
-            'labels': row.get('Labels', '').split(',') if pd.notna(row.get('Labels')) else [],
-        })
-    logger.info(f"Found {len(issues)} issues")
-    return issues
+# --- OpenAI ---------------------------------------------------------------------------------
+
+_openai_client: OpenAI | None = None
 
 
-@retry(max_retries=3, delay=2)
-def call_openai(client, messages, max_tokens=500):
-    return client.chat.completions.create(
-        model="gpt-4o",
-        messages=messages,
-        max_tokens=max_tokens,
-        timeout=30
+def model_name() -> str:
+    return os.getenv("OPENAI_MODEL") or DEFAULT_MODEL
+
+
+def openai_client() -> OpenAI:
+    """One shared client, created on first use so importing this module needs no key."""
+    global _openai_client
+    if _openai_client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set in .env.")
+        _openai_client = OpenAI(api_key=api_key, max_retries=3, timeout=60)
+    return _openai_client
+
+
+SYSTEM_PROMPT = f"""You write customer-facing release notes for Brightidea, a software product.
+You will be given one JIRA ticket. Respond with a JSON object containing three fields:
+
+- "title": a short headline of 3 to 7 words in Title Case, with no ending punctuation.
+- "note": exactly one sentence in plain language for a non-technical audience, usually starting
+  with "We". Say what changed for the customer. Do not add details that are not in the ticket.
+- "area": the section of the release notes this belongs in. Use "Whiteboard" for anything about
+  the Whiteboard feature (tickets often abbreviate it "WB"), "Project Room" for the Project Room
+  feature, "Hackathon" for the Hackathon feature, and "{GENERAL_SECTION}" for everything else.
+
+Rules:
+1. If the ticket's issue type is Bug, its area is not Whiteboard, and its labels do not include
+   "global", the note must end with "for some systems" (or "that had affected some systems") so
+   customers know the problem did not affect every instance. Otherwise do not add that phrase.
+2. Expand abbreviations: WB means Whiteboard, VI means View Idea, RTE means Rich Text Editor,
+   and so on. Never leave an abbreviation in the output.
+3. Never include a person's name or a company or customer name.
+4. Do not mention ticket numbers, internal system names, vulnerability identifiers, or
+   implementation details such as database queries or API endpoints.
+5. Plain text only: no HTML, no Markdown, no quotation marks around the sentence.
+
+Examples of well-written output:
+{{"title": "Addressed Confusion with Team Workspace Submit", "note": "We removed the active Submit button from the Team Workspace page when Submission is turned off to reduce confusion.", "area": "{GENERAL_SECTION}"}}
+{{"title": "View Idea 3 Dropdown Transparency Fix", "note": "We fixed a transparency issue within a dropdown on View Idea 3.", "area": "{GENERAL_SECTION}"}}
+{{"title": "Restored Unordered List Button", "note": "We fixed the unresponsive Unordered List button in the Initiative-level Rich Text Editor 2.0 that had affected some systems.", "area": "{GENERAL_SECTION}"}}
+{{"title": "Blue Diamond Gate Object", "note": "We updated the default Gate object to display a blue diamond emoji instead of an orange diamond.", "area": "{GENERAL_SECTION}"}}
+{{"title": "Toggle Logic for Table Tool", "note": "We updated the logic in the Whiteboard Left Toolbar to ensure that the Tables feature is displayed when enabled.", "area": "Whiteboard"}}
+"""  # noqa: E501
+
+NOTE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "release_note",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "note": {"type": "string"},
+                "area": {"type": "string", "enum": list(SECTIONS)},
+            },
+            "required": ["title", "note", "area"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+MAX_DESCRIPTION_CHARS = 6000  # plenty for a one-sentence note; bounds cost on huge tickets
+
+
+def ticket_prompt(title: str, description: str, labels: list[str], issue_type: str) -> str:
+    return (
+        f"Issue type: {issue_type or 'Unknown'}\n"
+        f"Labels: {', '.join(labels) if labels else 'none'}\n"
+        f"Title: {title}\n"
+        f"Description:\n{description.strip()[:MAX_DESCRIPTION_CHARS] or '(no description)'}"
+    )
+
+
+SCOPE_PHRASE = "for some systems"
+
+
+def ensure_scope_phrase(note: dict[str, str], issue_type: str, labels: list[str]) -> dict[str, str]:
+    """Guarantee rule 1 in code: a non-global Bug outside Whiteboard must say "for some systems".
+
+    The model usually phrases this naturally; when it forgets, the phrase is added before the
+    closing period so customers still learn the problem did not affect every instance.
+    """
+    is_bug = issue_type.strip().lower() == "bug"
+    is_global = any(label.strip().lower() == "global" for label in labels)
+    if not is_bug or is_global or note["area"] == "Whiteboard":
+        return note
+    if "some systems" in note["note"].lower():
+        return note
+    sentence = note["note"].strip().rstrip(".")
+    return {**note, "note": f"{sentence} {SCOPE_PHRASE}."}
+
+
+def write_note(
+    title: str, description: str, labels: list[str], issue_type: str = ""
+) -> dict[str, str]:
+    """Ask the model for {"title", "note", "area"} describing one ticket. Raises on failure."""
+    response = openai_client().chat.completions.create(
+        model=model_name(),
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": ticket_prompt(title, description, labels, issue_type)},
+        ],
+        response_format=NOTE_SCHEMA,
+        max_completion_tokens=300,
+    )
+    message = response.choices[0].message
+    if not message.content:
+        raise RuntimeError(f"OpenAI returned no note for {title!r}: {message.refusal or 'empty'}")
+    note = json.loads(message.content)
+    if note.get("area") not in SECTIONS:
+        note["area"] = GENERAL_SECTION
+    return ensure_scope_phrase(note, issue_type, labels)
+
+
+def note_html(note: dict[str, str]) -> str:
+    """'<strong>Title-</strong> Sentence.' Both parts are escaped, so model output is never HTML."""
+    return (
+        f"<strong>{html.escape(note['title'], quote=False)}-</strong> "
+        f"{html.escape(note['note'], quote=False)}"
     )
 
 
 @llm_expect(
-    dataset=os.path.join(EVALS_DIR, 'release_notes.jsonl'),
+    dataset=str(EVALS_DIR / "release_notes.jsonl"),
     tests=["accuracy", "instruction_adherence"],
     thresholds={"accuracy": 0.7, "instruction_adherence": 0.8},
     judge_provider="openai",
-    judge_model="gpt-4o",
+    judge_model=model_name(),
 )
-def create_release_note(client, title: str, description: str, labels: List[str]) -> str:
-    labels_str = ', '.join(labels) if labels else 'No labels'
-    messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content":
-            f"Create a single-sentence release note for the following issue:\n\n"
-            f"Title: {title}\nDescription: {description}.\n\n"
-            f"If it is a bug and not labeled with 'global' then make sure we include the note 'for some systems. This rule only applies to non whiteboard issues.' "
-            f"so people don't think it was broken in their instance as well."
-            f"Here are the labels for the issue {labels_str} \n\n"
-            f"The note should be in plane language and be as short as possible. Assume this is a non-technical audience.\n"
-            f"Please avoid rephrasing or expanding on my statements. Just provide the specific term or concept I'm asking for without additional context or suggestions.\n"
-            f"If the title has WB then it is for whiteboard.\n"
-            f"DO NOT hullucinate.\n"
-            f"DO NOT use any abbreviations, if you see VI make it View Idea, etc..\n\n"
-            f"DO NOT include anyones name or any business names.\n"
-            f"DO NOT inclue ``` or html anywhere in the response.\n"
-            f"ONLY return valid HTML, nothing outside of the <ul></ul> elements.\n"
-            f"Here are 5 examples of really well written release notes:\n"
-            f"<strong>Addressed Confusion with Team Workspace Submit-</strong> We removed the active Submit button from the Team Workspace page when Submission is turned off to reduce confusion.\n"
-            f"<strong>View Idea 3 Dropdown Transparency Fix-</strong> We fixed a transparency issue within a dropdown on View Idea 3.\n"
-            f"<strong>Restored Unordered List Button-</strong> We fixed the unresponsive Unordered List button in the Initiative-level Rich Text Editor 2.0 that had affected some systems.\n"
-            f"<strong>Blue Diamond Gate Object-</strong> We updated the default Gate object to display a blue diamond emoji instead of an orange diamond.\n"
-            f"<strong>Toggle Logic for Table Tool-</strong> We updated the logic in the Whiteboard Left Toolbar to ensure that Tables feature is displayed when enabled."
-        }
+def create_release_note(
+    title: str, description: str, labels: list[str], issue_type: str = ""
+) -> str:
+    """One finished release note as HTML. This is the function the LLM evaluation exercises."""
+    return note_html(write_note(title, description, labels, issue_type))
+
+
+# --- Page -----------------------------------------------------------------------------------
+
+
+def group_notes(notes: list[dict[str, str]]) -> dict[str, list[str]]:
+    """Section name -> note HTML, in SECTIONS order, with empty sections dropped."""
+    grouped: dict[str, list[str]] = {section: [] for section in SECTIONS}
+    for note in notes:
+        section = note["area"] if note["area"] in grouped else GENERAL_SECTION
+        grouped[section].append(note_html(note))
+    return {section: items for section, items in grouped.items() if items}
+
+
+def build_page(release_date: datetime, sections: dict[str, list[str]]) -> str:
+    """The article body: two intro paragraphs, then a heading and list for each section."""
+    date_text = f"{release_date:%A}, {long_date(release_date)}"
+    parts = [
+        (
+            f"<p>Our latest product release took effect <strong>{date_text}.</strong> "
+            "This post may be different from the release notes received via email.</p>"
+        ),
+        (
+            "<p>To read Brightidea's complete documentation, you can visit the "
+            f'<a href="{SUPPORT_PORTAL_URL}">Product Release Notes</a> '
+            "forum in the Support Portal.</p>"
+        ),
     ]
-    try:
-        response = call_openai(client, messages)
-        return strip_code_fences(response.choices[0].message.content)
-    except Exception as e:
-        logger.error(f"Failed to generate note for '{title}': {e}")
-        return f"<strong>{title}-</strong> Issue resolved."
+    for section, items in sections.items():
+        parts.append(f"<p><strong>{html.escape(section, quote=False)}</strong></p>")
+        parts.append("<ul>\n" + "\n".join(f"<li>{item}</li>" for item in items) + "\n</ul>")
+    return "\n".join(parts) + "\n"
 
 
-def categorize_notes(client, release_notes: str) -> str:
-    messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content":
-            f"Categorize the following release notes into sections like:"
-            f"'General bug fixes and enhancements', 'Project Room', 'Whiteboard', and 'Hackathon':\n\n"
-            f"{release_notes}.\n\n"
-            f"Make sure to return the list in the correct HTML format:\n\n"
-            f"<p><strong>Category Title</strong></p>"
-            f"<ul>"
-            f"<li>Release note.</li>"
-            f"<li>Release note</li>"
-            f"<li>...</li>"
-            f"</ul>"
-            f"DO NOT inclue ``` or html anywhere in the response.\n"
-        }
-    ]
-    try:
-        response = call_openai(client, messages, max_tokens=4096)
-        return strip_code_fences(response.choices[0].message.content)
-    except Exception as e:
-        logger.error(f"Failed to categorize: {e}")
-        return f"<p><strong>General bug fixes and enhancements</strong></p><ul>{release_notes}</ul>"
+def save_page(body: str, release_date: datetime) -> Path:
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    path = OUTPUT_DIR / f"release_notes_{release_date:%Y-%m-%d}.html"
+    path.write_text(body, encoding="utf-8")
+    return path
 
 
-def generate(csv_path: str = None, fix_versions: List[str] = None):
-    """Generate one combined release-notes page across the given fix versions.
-
-    Pulls from the JIRA API if configured (and fails if it matches no issues);
-    uses the newest CSV in jira-exports/ only when JIRA creds are not set.
-    """
-    api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY not set in .env file")
-
-    client = OpenAI(api_key=api_key)
-
-    issues = None
-
-    # Use the JIRA API when creds are set (and no explicit CSV given).
-    # fetch_jira_issues returns None only when creds are missing; it raises
-    # if JIRA is reachable but matches nothing, so we never silently publish
-    # a stale CSV export.
-    if csv_path is None:
-        issues = fetch_jira_issues(fix_versions)
-        if issues is not None:
-            print(f"Pulled {len(issues)} issues from JIRA API")
-
-    # CSV is only used when JIRA creds are not configured or a CSV was passed explicitly
-    if issues is None:
-        if csv_path is None:
-            csv_path = find_latest_csv()
-        if csv_path is None:
-            print("No JIRA creds configured and no CSV files in jira-exports/.")
-            return
-        issues = read_csv(csv_path)
-
-    if not issues:
-        print("No issues found.")
-        return
-
-    # Generate individual release notes
-    print(f"Processing {len(issues)} issues...")
-    all_notes = ""
-    for i, issue in enumerate(issues, 1):
-        print(f"  [{i}/{len(issues)}] {issue['summary'][:60]}")
-        note = create_release_note(client, issue['summary'], issue['description'], issue['labels'])
-        all_notes += f"<li>{note}</li>\n"
-
-    # Categorize
-    print("Categorizing...")
-    categorized = categorize_notes(client, all_notes)
-
-    # Build HTML — use the most recent fix version date if set, else today
-    fix_versions = fix_versions or parse_versions(get_fix_version_env())
-    if fix_versions:
-        release_date = max(parse_version_date(v) for v in fix_versions)
-    else:
-        release_date = datetime.today()
-    day_of_week, formatted_date = format_date(release_date)
-    title = f"Product Release Notes - {formatted_date}"
-
-    body = f"""<p>Our latest product release took effect <strong>{day_of_week}, {formatted_date}.</strong> This post may be different from the release notes received via email.</p>
-<p>To read Brightidea's complete documentation, you can visit the <a href="https://support.brightidea.com/hc/en-us/sections/200825397-Product-Release-Notes">Product Release Notes</a> forum in the Support Portal.</p>
-{categorized}
-"""
-
-    # Save
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
-    filename = f"{safe_title}_{release_date.strftime('%m_%d_%Y')}.html"
-    file_path = os.path.join(OUTPUT_DIR, filename)
-
-    full_html = body
-
-    with open(file_path, 'w', encoding='utf-8') as f:
-        f.write(full_html)
-
-    print(f"\nDone! Output saved to: {file_path}")
-
-    # Publish to Zendesk if configured
-    zendesk_url = publish_to_zendesk(title, body)
-    if zendesk_url:
-        print(f"\nZendesk draft created: \033]8;;{zendesk_url}\033\\{zendesk_url}\033]8;;\033\\")
-        post_to_slack(title, zendesk_url)
-
-    return file_path
+# --- Zendesk --------------------------------------------------------------------------------
 
 
-def publish_to_zendesk(title: str, body: str) -> str:
-    subdomain = os.getenv('ZENDESK_SUBDOMAIN')
-    email = os.getenv('ZENDESK_EMAIL')
-    token = os.getenv('ZENDESK_API_TOKEN')
-    section_id = os.getenv('ZENDESK_SECTION_ID')
-
-    if not all([subdomain, email, token, section_id]):
+def zendesk_settings() -> dict | None:
+    subdomain = os.getenv("ZENDESK_SUBDOMAIN")
+    email = os.getenv("ZENDESK_EMAIL")
+    token = os.getenv("ZENDESK_API_TOKEN")
+    section_id = os.getenv("ZENDESK_SECTION_ID")
+    if not (subdomain and email and token and section_id):
         return None
+    return {
+        "base": f"https://{subdomain}.zendesk.com",
+        "auth": (f"{email}/token", token),
+        "section_id": section_id,
+        "permission_group_id": os.getenv("ZENDESK_PERMISSION_GROUP_ID"),
+    }
 
-    auth = (f"{email}/token", token)
-    headers = {"Content-Type": "application/json"}
-    permission_group_id = os.getenv('ZENDESK_PERMISSION_GROUP_ID')
 
-    # Check if article with same title already exists in this section
-    existing_id = find_existing_article(subdomain, auth, section_id, title)
-
-    if existing_id:
-        # Update existing article
-        url = f"https://{subdomain}.zendesk.com/api/v2/help_center/articles/{existing_id}/translations/en-us"
-        payload = {"translation": {"body": body, "title": title}}
-        logger.info(f"Updating existing Zendesk article {existing_id}: {title}")
-        response = requests.put(url, json=payload, auth=auth, headers=headers)
-    else:
-        # Create new article
-        url = f"https://{subdomain}.zendesk.com/api/v2/help_center/sections/{section_id}/articles"
-        payload = {
-            "article": {
-                "title": title,
-                "body": body,
-                "locale": "en-us",
-                "draft": True,
-                "user_segment_id": None,
-            },
-            "notify_subscribers": False,
-        }
-        if permission_group_id:
-            payload["article"]["permission_group_id"] = int(permission_group_id)
-        logger.info(f"Creating new Zendesk article: {title}")
-        response = requests.post(url, json=payload, auth=auth, headers=headers)
-
+def find_existing_article(zd: dict, title: str) -> dict | None:
+    """The newest article in the section with exactly this title, or None."""
+    url = f"{zd['base']}/api/v2/help_center/sections/{zd['section_id']}/articles.json"
+    params = {"sort_by": "created_at", "sort_order": "desc", "per_page": 100}
+    response = requests.get(url, auth=zd["auth"], params=params, timeout=HTTP_TIMEOUT)
     if not response.ok:
-        logger.error(f"Zendesk error: {response.status_code} - {response.text}")
-        response.raise_for_status()
-
-    if existing_id:
-        article_id = existing_id
-    else:
-        article_id = response.json()["article"]["id"]
-
-    article_url = f"https://{subdomain}.zendesk.com/hc/en-us/articles/{article_id}"
-    logger.info(f"Zendesk article {'updated' if existing_id else 'created'}: {article_url}")
-    return article_url
-
-
-def find_existing_article(subdomain, auth, section_id, title):
-    url = f"https://{subdomain}.zendesk.com/api/v2/help_center/sections/{section_id}/articles"
-    response = requests.get(url, auth=auth)
-    if not response.ok:
-        return None
+        raise RuntimeError(
+            f"Zendesk error {response.status_code} listing articles: {response.text[:500]}"
+        )
     for article in response.json().get("articles", []):
-        if article["title"] == title:
-            return article["id"]
+        if article.get("title") == title:
+            return article
     return None
 
 
-def post_to_slack(title: str, zendesk_url: str):
-    token = os.getenv('SLACK_BOT_TOKEN')
-    channel = os.getenv('SLACK_CHANNEL', 'C03BD30JG58')
+def publish_to_zendesk(title: str, body: str) -> str | None:
+    """Create or update a DRAFT article and return its URL; None when Zendesk is not configured.
 
+    Never touches an article that has already been published: that would silently change what
+    customers see, so the run stops with an error instead.
+    """
+    zd = zendesk_settings()
+    if zd is None:
+        log.info("Zendesk is not configured; skipping.")
+        return None
+
+    existing = find_existing_article(zd, title)
+    if existing and not existing.get("draft", False):
+        raise RuntimeError(
+            f"A Zendesk article titled {title!r} is already published "
+            f"({existing.get('html_url')}). Refusing to overwrite live content. "
+            "Edit that article in Zendesk, or delete it and re-run."
+        )
+
+    if existing:
+        article_id = existing["id"]
+        url = f"{zd['base']}/api/v2/help_center/articles/{article_id}/translations/en-us.json"
+        payload = {"translation": {"title": title, "body": body, "draft": True}}
+        log.info("Updating existing Zendesk draft %s", article_id)
+        response = requests.put(url, json=payload, auth=zd["auth"], timeout=HTTP_TIMEOUT)
+    else:
+        url = f"{zd['base']}/api/v2/help_center/sections/{zd['section_id']}/articles.json"
+        article: dict = {
+            "title": title,
+            "body": body,
+            "locale": "en-us",
+            "draft": True,
+            "user_segment_id": None,
+        }
+        if zd["permission_group_id"]:
+            article["permission_group_id"] = int(zd["permission_group_id"])
+        payload = {"article": article, "notify_subscribers": False}
+        log.info("Creating Zendesk draft: %s", title)
+        response = requests.post(url, json=payload, auth=zd["auth"], timeout=HTTP_TIMEOUT)
+
+    if not response.ok:
+        raise RuntimeError(f"Zendesk error {response.status_code}: {response.text[:500]}")
+    if not existing:
+        article_id = response.json()["article"]["id"]
+    return f"{zd['base']}/hc/en-us/articles/{article_id}"
+
+
+# --- Slack ----------------------------------------------------------------------------------
+
+
+def post_to_slack(title: str, url: str) -> bool:
+    """Post the draft link. Returns False (and logs why) when skipped or rejected."""
+    token = os.getenv("SLACK_BOT_TOKEN")
+    channel = os.getenv("SLACK_CHANNEL")
     if not token:
-        return
+        return False
+    if not channel:
+        log.warning("SLACK_BOT_TOKEN is set but SLACK_CHANNEL is not; skipping Slack.")
+        return False
 
     response = requests.post(
         "https://slack.com/api/chat.postMessage",
         headers={"Authorization": f"Bearer {token}"},
-        json={
-            "channel": channel,
-            "text": f"*{title}*\n{zendesk_url}",
-        },
+        json={"channel": channel, "text": f"*{title}*\n{url}"},
+        timeout=HTTP_TIMEOUT,
     )
-    data = response.json()
-    if data.get("ok"):
-        print(f"Posted to Slack: #{channel}")
-    else:
-        logger.error(f"Slack error: {data.get('error')}")
+    try:
+        data = response.json()
+    except ValueError:
+        data = {"ok": False, "error": f"HTTP {response.status_code}"}
+    if not data.get("ok"):
+        log.error("Slack rejected the message: %s", data.get("error"))
+        return False
+    log.info("Posted to Slack channel %s", channel)
+    return True
 
 
-def test_connections():
-    """Verify access to JIRA, Zendesk, and Slack."""
-    ok = True
+# --- Pipeline -------------------------------------------------------------------------------
 
-    # JIRA
-    server = os.getenv('JIRA_SERVER')
-    username = os.getenv('JIRA_USERNAME')
-    token = os.getenv('JIRA_API_TOKEN')
-    if not all([server, username, token]):
-        print("[SKIP] JIRA  — creds not set")
+
+def generate(fix_versions: list[str] | None = None, dry_run: bool = False) -> Path:
+    """Run the whole pipeline and return the path of the saved HTML page."""
+    fix_versions = fix_versions or [datetime.today().strftime("%m-%d-%Y")]
+    # Validate everything we can before any network call or OpenAI spend.
+    release_date = max(parse_version_date(v) for v in fix_versions)
+    openai_client()
+    if len(fix_versions) > 1:
+        log.info("Combining %d fix versions into one page: %s", len(fix_versions), fix_versions)
+
+    issues = fetch_jira_issues(fix_versions)
+
+    log.info("Writing %d release notes with %s", len(issues), model_name())
+    notes = []
+    for i, issue in enumerate(issues, 1):
+        log.info("  [%d/%d] %s: %s", i, len(issues), issue.key, issue.summary[:60])
+        notes.append(write_note(issue.summary, issue.description, issue.labels, issue.issue_type))
+
+    title = f"Product Release Notes - {long_date(release_date)}"
+    body = build_page(release_date, group_notes(notes))
+    path = save_page(body, release_date)
+    log.info("Saved: %s", path)
+
+    if dry_run:
+        log.info("Dry run: skipping Zendesk and Slack.")
+        return path
+
+    article_url = publish_to_zendesk(title, body)
+    if article_url:
+        log.info("Zendesk draft: %s", article_url)
+        post_to_slack(title, article_url)
+    return path
+
+
+# --- Connection check -----------------------------------------------------------------------
+
+
+def check_connections() -> bool:
+    """Try each configured service with a harmless read. Returns True when nothing failed."""
+    failed = False
+
+    def report(status: str, service: str, detail: str) -> None:
+        nonlocal failed
+        failed = failed or status == "FAIL"
+        log.info("[%s] %-8s %s", status, service, detail)
+
+    creds = jira_credentials()
+    if creds is None:
+        report("SKIP", "JIRA", "credentials not set")
     else:
         try:
-            client = JIRA(server=server, basic_auth=(username, token))
-            user = client.myself()
-            print(f"[OK]   JIRA  — {user.get('displayName')} <{user.get('emailAddress')}>")
-        except Exception as e:
-            print(f"[FAIL] JIRA  — {e}")
-            ok = False
+            me = JIRA(server=creds[0], basic_auth=creds[1:]).myself()
+            report("OK", "JIRA", f"{me.get('displayName')} <{me.get('emailAddress')}>")
+        except Exception as exc:  # report every failure the same way
+            report("FAIL", "JIRA", str(exc))
 
-    # Zendesk
-    subdomain = os.getenv('ZENDESK_SUBDOMAIN')
-    email = os.getenv('ZENDESK_EMAIL')
-    zd_token = os.getenv('ZENDESK_API_TOKEN')
-    section_id = os.getenv('ZENDESK_SECTION_ID')
-    if not all([subdomain, email, zd_token, section_id]):
-        print("[SKIP] Zendesk — creds not set")
+    if not os.getenv("OPENAI_API_KEY"):
+        report("SKIP", "OpenAI", "OPENAI_API_KEY not set")
     else:
         try:
-            url = f"https://{subdomain}.zendesk.com/api/v2/help_center/sections/{section_id}.json"
-            r = requests.get(url, auth=(f"{email}/token", zd_token), timeout=10)
-            if r.ok:
-                section = r.json().get('section', {})
-                print(f"[OK]   Zendesk — section {section_id}: {section.get('name')}")
+            model = openai_client().models.retrieve(model_name())
+            report("OK", "OpenAI", f"model {model.id} available")
+        except Exception as exc:
+            report("FAIL", "OpenAI", str(exc))
+
+    zd = zendesk_settings()
+    if zd is None:
+        report("SKIP", "Zendesk", "credentials not set")
+    else:
+        try:
+            url = f"{zd['base']}/api/v2/help_center/sections/{zd['section_id']}.json"
+            response = requests.get(url, auth=zd["auth"], timeout=HTTP_TIMEOUT)
+            if response.ok:
+                name = response.json().get("section", {}).get("name")
+                report("OK", "Zendesk", f"section {zd['section_id']}: {name}")
             else:
-                print(f"[FAIL] Zendesk — {r.status_code}: {r.text}")
-                ok = False
-        except Exception as e:
-            print(f"[FAIL] Zendesk — {e}")
-            ok = False
+                report("FAIL", "Zendesk", f"{response.status_code}: {response.text[:200]}")
+        except Exception as exc:
+            report("FAIL", "Zendesk", str(exc))
 
-    # Slack
-    slack_token = os.getenv('SLACK_BOT_TOKEN')
-    channel = os.getenv('SLACK_CHANNEL')
-    if not slack_token:
-        print("[SKIP] Slack — token not set")
+    token = os.getenv("SLACK_BOT_TOKEN")
+    if not token:
+        report("SKIP", "Slack", "SLACK_BOT_TOKEN not set")
     else:
         try:
-            r = requests.post(
+            response = requests.post(
                 "https://slack.com/api/auth.test",
-                headers={"Authorization": f"Bearer {slack_token}"},
-                timeout=10,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=HTTP_TIMEOUT,
             )
-            data = r.json()
+            data = response.json()
             if data.get("ok"):
-                print(f"[OK]   Slack — bot {data.get('user')} in {data.get('team')} (channel: {channel})")
+                channel = os.getenv("SLACK_CHANNEL") or "SLACK_CHANNEL NOT SET"
+                detail = f"bot {data.get('user')} in {data.get('team')} (channel {channel})"
+                report("OK", "Slack", detail)
             else:
-                print(f"[FAIL] Slack — {data.get('error')}")
-                ok = False
-        except Exception as e:
-            print(f"[FAIL] Slack — {e}")
-            ok = False
+                report("FAIL", "Slack", str(data.get("error")))
+        except Exception as exc:
+            report("FAIL", "Slack", str(exc))
 
-    return ok
+    return not failed
+
+
+# --- Command line ---------------------------------------------------------------------------
+
+
+def main(argv: list[str]) -> int:
+    args = [a for a in argv if a != "--dry-run"]
+    dry_run = len(args) != len(argv)
+    if args and args[0] == "test":
+        return 0 if check_connections() else 1
+
+    versions = parse_versions(",".join(args)) or parse_versions(os.getenv("FIX_VERSION"))
+    try:
+        generate(versions or None, dry_run=dry_run)
+    except Exception as exc:  # a clean message beats a traceback for operators
+        log.error("%s", exc, exc_info=log.isEnabledFor(logging.DEBUG))
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
-        sys.exit(0 if test_connections() else 1)
-
-    versions = parse_versions(get_fix_version_env())
-    if len(versions) > 1:
-        print(f"Combining {len(versions)} versions into one page: {', '.join(versions)}")
-    generate(fix_versions=versions or None)
+    sys.exit(main(sys.argv[1:]))

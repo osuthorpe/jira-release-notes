@@ -6,9 +6,9 @@ When you run it, it:
 
 1. Pulls the tickets for a release from Jira
 2. Uses AI (OpenAI) to rewrite each ticket as a short, plain-language release note
-3. Groups the notes into categories (General fixes, Whiteboard, etc.)
+3. Groups the notes into sections (General fixes, Project Room, Whiteboard, Hackathon)
 4. Saves the finished page as an HTML file in the `output/` folder
-5. Creates (or updates) a **draft** article in Zendesk — nothing is published to customers automatically
+5. Creates (or updates) a **draft** article in Zendesk — nothing is published to customers automatically, and the tool refuses to touch an article that has already been published
 6. Posts a link to the draft in Slack so the team can review it
 
 You only have to set things up once. After that, generating release notes is a single command.
@@ -17,7 +17,7 @@ You only have to set things up once. After that, generating release notes is a s
 
 ## Part 1: One-time computer setup
 
-You need a Mac with Python 3 installed (Macs usually have it already).
+You need a Mac with Python 3.11 or newer. Check with `python3 --version` in Terminal; if it is older or missing, install it with `brew install python` or from <https://www.python.org/downloads/>.
 
 1. Open the **Terminal** app.
 2. Download this project (if you haven't already) and go into its folder:
@@ -64,7 +64,7 @@ So before running the tool, make sure every ticket you want in the release notes
 
 Tickets missing any of these will simply not appear in the notes.
 
-> Tip: writing a clear ticket **Summary** and **Description** matters — the AI uses those to write the customer-facing note. Also: if a bug only affected some customers, do **not** add the label `global`; the tool will then add "for some systems" wording so customers don't think their instance was broken.
+> Tip: writing a clear ticket **Summary** and **Description** matters — the AI uses those, plus the ticket's issue type, to write the customer-facing note. If a bug only affected some customers, do **not** add the label `global`; the tool will then add "for some systems" wording so customers don't think their instance was broken.
 
 ### Get your Jira login details for the `.env` file
 
@@ -84,7 +84,7 @@ JIRA_USERNAME=you@yourcompany.com
 JIRA_API_TOKEN=paste-your-token-here
 ```
 
-> Advanced (optional): if you ever need to pull tickets from a different project or with different rules, you can add a custom `JIRA_JQL_QUERY=` line to override the defaults. Most people should leave this out.
+> Advanced (optional): if you ever need to pull tickets from a different project or with different rules, you can add a `JIRA_JQL_QUERY=` line to replace the default query entirely. Most people should leave this out.
 
 ---
 
@@ -114,7 +114,10 @@ ZENDESK_API_TOKEN=paste-your-token-here
 ZENDESK_SECTION_ID=200825397
 ```
 
-The tool always creates the Zendesk article as a **draft**. A person still reviews and publishes it. If an article with the same title already exists (e.g. you run the tool twice for the same release), it updates that draft instead of creating a duplicate.
+The tool always creates the Zendesk article as a **draft**. A person still reviews and publishes it.
+
+- If a **draft** with the same title already exists (for example, you run the tool twice for the same release), it updates that draft instead of creating a duplicate.
+- If an article with the same title has already been **published**, the tool stops with an error rather than overwriting what customers can see. Edit the live article in Zendesk, or delete it and run the tool again.
 
 ---
 
@@ -130,16 +133,18 @@ The tool always creates the Zendesk article as a **draft**. A person still revie
 OPENAI_API_KEY=paste-your-key-here
 ```
 
+> Optional: add `OPENAI_MODEL=` to choose a different model. If you leave it out, the tool uses `gpt-4o`.
+
 ### Slack (optional — posts the draft link for review)
 
-If you skip this, everything still works; you just won't get the Slack message.
+If you skip this, everything still works; you just won't get the Slack message. If you set it up, you need **both** values.
 
 1. **SLACK_BOT_TOKEN** — a bot token starting with `xoxb-`. Ask whoever manages your Slack apps, or create one at <https://api.slack.com/apps> (the app needs the `chat:write` permission and must be invited to the channel).
 2. **SLACK_CHANNEL** — the channel ID to post in. In Slack, right-click the channel → **View channel details** → the ID (starts with `C`) is at the bottom.
 
 ```ini
 SLACK_BOT_TOKEN=xoxb-paste-your-token-here
-SLACK_CHANNEL=C03BD30JG58
+SLACK_CHANNEL=C0123456789
 ```
 
 ---
@@ -152,7 +157,7 @@ Before your first real run, test all the connections:
 make test
 ```
 
-You should see `[OK]` next to JIRA, Zendesk, and Slack. If anything says `[FAIL]`, the message next to it tells you which key in `.env` to double-check. `[SKIP]` just means you left that service unconfigured, which is fine for the optional ones.
+You should see `[OK]` next to JIRA, OpenAI, Zendesk, and Slack. If anything says `[FAIL]`, the message next to it tells you which key in `.env` to double-check. `[SKIP]` just means you left that service unconfigured, which is fine for the optional ones.
 
 ---
 
@@ -174,14 +179,20 @@ make run FIX_VERSION="06-12-2026, 06-05-2026"
 
 **No date given?** If you run plain `make run`, it uses today's date as the Fix Version.
 
+**Want to look before anything goes to Zendesk?** A dry run writes the HTML file and stops there — no Zendesk draft, no Slack message:
+
+```bash
+make dry-run FIX_VERSION="06-12-2026"
+```
+
 ### What you'll see
 
 The tool prints each ticket as it processes it, then finishes with something like:
 
 ```text
-Done! Output saved to: output/Product_Release_Notes_-_June_12th_2026.html
-Zendesk draft created: https://brightidea.zendesk.com/hc/en-us/articles/123456789
-Posted to Slack: #C03BD30JG58
+Saved: /Users/you/Documents/GitHub/jira-release-notes/output/release_notes_2026-06-12.html
+Zendesk draft: https://brightidea.zendesk.com/hc/en-us/articles/123456789
+Posted to Slack channel C0123456789
 ```
 
 ### After it runs
@@ -197,9 +208,21 @@ Posted to Slack: #C03BD30JG58
 | Problem | What to do |
 | --- | --- |
 | `make: command not found` | You may need to install Apple's developer tools: run `xcode-select --install` and try again |
-| `OPENAI_API_KEY not set` | Open `.env` and make sure the OpenAI key line is filled in (no quotes needed) |
+| `OPENAI_API_KEY is not set` | Open `.env` and make sure the OpenAI key line is filled in (no quotes needed) |
+| `Fix version ... is not a date` | Dates must look like `06-12-2026` (month-day-year with dashes) |
 | `[FAIL] JIRA` in `make test` | Re-check `JIRA_SERVER` (full `https://...` address), your email, and the API token. Tokens expire — create a fresh one if needed |
+| `[FAIL] OpenAI` in `make test` | Re-check `OPENAI_API_KEY`. If you set `OPENAI_MODEL`, make sure the name is spelled exactly as OpenAI lists it |
 | `[FAIL] Zendesk` | Re-check the subdomain, email, token, and section ID. Confirm **Token access** is enabled in the Zendesk Admin Center |
-| It stops with `JIRA returned 0 issues` | The run fails on purpose rather than publishing stale notes. The Jira tickets are missing something — check Project = **BPD**, label = **Release_Notes**, and the Fix Version date matches exactly what you typed in the command. Fix the tickets and run again |
-| Slack message didn't appear | Make sure the bot was invited to the channel and `SLACK_CHANNEL` is the channel **ID** (starts with `C`), not the channel name |
-| No Jira access at all | Export the tickets from Jira as a CSV, drop the file into the `jira-exports/` folder, and run `make run` — it uses the newest CSV automatically |
+| It stops with `JIRA returned 0 issues` | The run fails on purpose rather than publishing empty notes. Check Project = **BPD**, label = **Release_Notes**, and that the Fix Version date matches exactly what you typed in the command. Fix the tickets and run again |
+| It stops with `already published` | An article with this title is live in Zendesk. Edit it there, or delete it and run the tool again |
+| Slack message didn't appear | Make sure the bot was invited to the channel and `SLACK_CHANNEL` is the channel **ID** (starts with `C`), not the channel name. Both `SLACK_BOT_TOKEN` and `SLACK_CHANNEL` must be set |
+| Something else went wrong | Run the same command with `LOG_LEVEL=DEBUG` in front of it to see the full error details |
+
+---
+
+## For developers
+
+- `make unit` runs the unit tests (no network or keys needed); `make lint` runs ruff.
+- `make eval` runs the LLM quality evaluation in `evals/release_notes.jsonl` against the live model. It costs OpenAI credits, so it is skipped unless `RUN_LLM_EVALS=1` is set.
+- GitHub Actions: **CI** (lint + unit tests on Python 3.11 and 3.13), **Security** (dependency audit, static analysis, secret scan, weekly), and **LLM Evaluation** (pull requests that touch the prompt or eval set, or manual). Dependabot proposes dependency and action updates weekly.
+- Dependencies are pinned in `requirements.txt` (runtime) and `requirements-dev.txt` (tooling).

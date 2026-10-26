@@ -1,5 +1,5 @@
 # Runtime dependencies. Pinned so every install is identical; Dependabot proposes bumps.
-openai==3.11.0
+openai==3.37.0
 python-dotenv==1.2.3
 jira==3.10.5
 requests==2.34.2
